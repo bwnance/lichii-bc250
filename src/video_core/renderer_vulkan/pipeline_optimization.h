@@ -17,7 +17,7 @@ inline bool BuildsUnoptimized(VkDriverId driver_id, u64 shader_hash) {
         0xf9ea14a22394f5b1ULL, // compute shader built as the AV1 intro starts: 18 min (#200)
         0xe0a992208d87eeb8ULL, // Kokiri Forest compute shader: 1.3-4 s stalls (RX 9070 XT, 2.0.416)
     };
-    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY &&
+    return (driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_RADV) &&
            std::ranges::find(amd_proprietary, shader_hash) != amd_proprietary.end();
 }
 
