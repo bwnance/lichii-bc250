@@ -136,6 +136,29 @@ generation at 2x capped at 30, Dynamic FPS on (console-speed movement at any fra
 and Max Resolution off (the game's dynamic resolution drops under GPU load). If any of
 those are changed, expect different results.
 
+## Reference console configuration
+
+The performance above was measured with this hardware and tuning (the numbers assume the
+installer's wrapper and config *plus* these settings):
+
+| Setting | Value | Applied how |
+|---|---|---|
+| Memory | 16 GB total; **UMA carve-out 1024 MB** (~14.7 GB system RAM) | BIOS / `bc250-tune set uma 1024`, one reboot |
+| CPU | All 8 cores enabled (stock boots with 6) | `bc250-tune set cores 8`, warm reboot; kept across cold boots with `cores-auto-reboot on` |
+| GPU compute units | 40 (all WGPs routed) | `bc250-tune set cu 40` |
+| GPU clocks | 500–2000 MHz governor range (stock caps at 1850; 2000 is stable under emulation load on stock cooling) | `bc250-tune set gpu-max 2000` |
+| Fans | Software curve, 10% floor to 60 °C, 100% at 80 °C | `bc250-tune set fan-curve on fan-min 10 fan-low 60 fan-high 80` |
+
+Notes:
+- The 1024 MB carve-out is the biggest single lever: the game's guest memory plus the
+  texture cache does not fit in the stock 6 GB carve-out alongside the OS, and the
+  emulator OOM-kills. At 1024 MB the GPU spills into shared memory, which this workload
+  tolerates well.
+- 2000 MHz over the stock 1850 is stable for emulation on this box, but it is outside the
+  image's default for a reason: watch your temperatures. The fan curve above holds the
+  SoC around 60 °C under load; if yours runs hotter, drop back to 1850.
+- The GPU's minimum 500 MHz saves ~10 W at idle and does not affect load performance.
+
 ## Verified on hardware (BC-250, RADV GFX1013)
 
 - Foliage and building walls render (mesh fallback); no white holes.
