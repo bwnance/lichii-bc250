@@ -87,7 +87,7 @@ public:
         const auto& dev = device.GetLogical();
         // AMD's driver: read what is available without blocking; a result that has not landed
         // counts as visible (1024 samples), as in the GPU-side resolve (SyncWrites).
-        if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY) {
+        if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY || device.GetDriverID() == VK_DRIVER_ID_MESA_RADV) {
             std::array<std::pair<u64, u64>, BANK_SIZE> values{};
             const VkResult query_result = dev.GetQueryResults(
                 *query_pool, static_cast<u32>(start), static_cast<u32>(size),
@@ -321,7 +321,7 @@ public:
                 // "visible" count (1024 samples) and copy without waiting: Vulkan leaves the slots
                 // of unavailable queries unwritten, so a late result reads as visible (an occluded
                 // object drawn) instead of hidden (the scene vanished) or a stall (9 -> 22 FPS).
-                const bool preset_visible = device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY;
+                const bool preset_visible = (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY || device.GetDriverID() == VK_DRIVER_ID_MESA_RADV);
                 const bool no_wait = preset_visible;
                 scheduler.RequestOutsideRenderPassOperationContext();
                 scheduler.Record([merged, span_start, span_end, base_offset, query_pool,

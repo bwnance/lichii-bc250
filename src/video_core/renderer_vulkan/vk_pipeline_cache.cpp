@@ -1418,7 +1418,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
         const bool enabled = value != nullptr
                                  ? value[0] == '1'
-                                 : device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY;
+                                 : (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY || device.GetDriverID() == VK_DRIVER_ID_MESA_RADV);
         if (enabled) {
             LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws skip unbuilt pipelines");
         }
