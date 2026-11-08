@@ -1,102 +1,59 @@
-<!--
-# SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
-# SPDX-License-Identifier: GPL-3.0-or-later
+# oot-bc250
 
-# SPDX-FileCopyrightText: 2018 yuzu Emulator Project
-# SPDX-License-Identifier: GPL-2.0-or-later
--->
+A [Lichii](https://github.com/zortos293/Lichii) fork tuned for **The Legend of Zelda:
+Ocarina of Time (Switch 2)** on the **AMD BC-250 console** (GFX1013-class iGPU, RADV,
+1080p TV output, shared-memory 16 GB with a small UMA carve-out).
 
-<h2 align="center">⚠️ Lichii has no official website ⚠️</h2>
+All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; this repo only
+carries the BC-250-specific deltas on top. GPLv3, like upstream.
 
-> [!CAUTION]
-> **Lichii has no official website.** The only site run by this project is the **game compatibility website, [lichii.zortos.me](https://lichii.zortos.me)**, for compatibility reports only. Download Lichii **only** from this repository's [releases page](https://github.com/zortos293/Lichii/releases). Any other "Lichii" website or download (such as lichii.org) is not ours and may contain malware ([#545](https://github.com/zortos293/Lichii/issues/545)).
+## What this fork adds on top of upstream `nx2`
 
-<p align="center">
-  <img src="dist/branding/lichii_icon_with_logo.png" alt="Lichii" width="600">
-</p>
+1. **PR #573 AMD performance fixes, ported and RADV-gated.** Upstream gates every fix on
+   AMD's proprietary Windows driver; the BC-250 runs RADV (`VK_DRIVER_ID_MESA_RADV`), so
+   they never fired there. This fork extends the gates:
+   - Query-cache copies no longer block on slots where no query ended (9 -> 22 fps on the
+     PR author's 9070 XT; removes the occlusion-culling stalls OoT suffers from).
+   - Already-satisfied semaphore acquires skip the split-GPU-thread drain (73% of ~2800/s
+     acquires in Kokiri Forest).
+   - Native submission budget of 512 draws on RADV.
+   - Large texture unswizzles split over helper threads.
+   - The Kokiri Forest compute shader builds unoptimized (1.3-4 s stalls on AMD).
+   - Async draw discard defaults on for RADV (new pipelines no longer freeze the game).
+2. Based on upstream `nx2` including the merged **task/mesh fallback** (PR #569): the
+   BC-250's GPU lacks `VK_EXT_mesh_shader`, so without it OoT's foliage, building walls and
+   other task/mesh geometry is skipped entirely. With it, the missing geometry renders
+   correctly (verified on hardware).
 
-# Lichii
+## Building
 
-Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
+Tested on Fedora 42 with clang; CLI only (no Qt):
 
-This is an independent fork, not an official release of those upstream projects. Lichii is not affiliated with Nintendo.
-
-Visit the [Lichii game compatibility website](https://lichii.zortos.me) to find games and compare community compatibility reports.
-
-## Downloads and setup
-
-Download Lichii only from this repository's [releases page](https://github.com/zortos293/Lichii/releases). Lichii has no other download site: archives offered elsewhere, such as lichii.org, are not built by this project, and one has been reported to install malware ([#545](https://github.com/zortos293/Lichii/issues/545)).
-
-On Windows, extract the entire build archive and run **lichii.exe**. Only use games and system files you have legally obtained. Games, keys and firmware are not included.
-
-### Existing saves and settings
-
-The rebrand intentionally retains the existing Eden/Eglantine data directories and configuration keys. It does not move or delete saves, settings or shader caches. Back up your saves before testing experimental builds.
-
-## Compatibility and issue reports
-
-Compatibility and performance vary by game, hardware and driver. Rendering errors, stutters and crashes remain possible. Passing automated tests does not establish that a game renders correctly, and this project makes no universal frame-rate guarantee.
-
-Browse [community compatibility reports](https://lichii.zortos.me/reports) for results with each player's build and setup.
-
-Desktop reporting requires a build containing [PR #303](https://github.com/zortos293/Lichii/pull/303) and is not available in build 88. In builds that include it, play and stop a Switch 2 game, then right-click that game and choose **Submit compatibility report**. Only the latest session in the current Lichii process is eligible.
-
-Confirm the matching website catalog entry and review the editable machine, game, setup, and enabled add-on details prefilled where available. Check the public preview and give explicit consent before submitting. Nothing uploads automatically, and the native v1 reporter does not read or upload logs or files.
-
-When [reporting an issue](https://github.com/zortos293/Eglantine/issues), include:
-
-- The exact build, game version, CPU, GPU and driver version.
-- Relevant settings and steps to reproduce the problem.
-- A screenshot and the log from the affected session, after checking it for personal information.
-
-Do not upload game files, keys, firmware or private account information.
-
-## Building and contributing
-
-See the [build guide](docs/Build.md), [user documentation](docs/user/README.md) and [coding guidelines](docs/Coding.md). Some inherited documentation and internal build target names still use upstream names. The GUI build target remains `yuzu`; its output is `lichii.exe` on Windows and `lichii` on other desktop platforms.
-
-Keep changes focused and distinguish code-level checks from actual gameplay testing.
-
-## Artwork
-Art created by YOB (yobslab)
-The supplied Lichii logo, icon and library artwork are in [dist/branding](dist/branding). Windows, Linux and macOS icon resources are generated from that artwork by [Generate-LichiiIcons.ps1](tools/Generate-LichiiIcons.ps1).
-
-## Support Lichii
-
-Lichii is free and stays free. If you want to help, you can donate in crypto. Donations help pay for the AI tools and build machines used to develop this open-source project faster.
-
-**Solana (SOL)**
-```text
-JepEjfyWjGjhJvHSrqj52KtLjcbbbmUh1iGqerYBF4w
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_QT=OFF -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF \
+  -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build --target eden-cli
 ```
 
-**Ethereum (ETH)**
-```text
-0x055ABa1b80Bc35C836Ce7E9F47c2b3d6C75b5534
-```
+`src/audio_core/out/` must be present (it is in this branch's history; it is gitignored in
+some upstream source exports, and the build fails without it).
 
-**Bitcoin (BTC)**
-```text
-bc1qcvxdpf4qvdhqp8ee4s355cjmxrzsphsdwpl8w4
-```
+## Runtime notes for the BC-250
 
-**BNB Smart Chain (BNB)**
-```text
-0x055ABa1b80Bc35C836Ce7E9F47c2b3d6C75b5534
-```
+- Firmware and keys go where upstream expects them (`~/.local/share/eden/keys`,
+  `nand/system/Contents/registered/<ncaid>/00`). You must dump these from your own console.
+- The built-in **Dynamic FPS** add-on makes game speed follow wall-clock time, so movement
+  stays console-speed below 30 fps; disable it in Add-Ons if you prefer frame-locked timing
+  (game then runs slow-motion under 30 fps).
+- The built-in **Max Resolution** add-on pins the internal resolution; leaving it disabled
+  lets the game's dynamic resolution drop under GPU load (recommended on an iGPU).
+- FSR3 frame generation (`frame_gen`, type `Fsr3`) works; it acts after the game presents,
+  so in-emulator frame counters do not include generated frames.
 
-**Polygon**
-```text
-0x055ABa1b80Bc35C836Ce7E9F47c2b3d6C75b5534
-```
+## Verified on hardware (BC-250, RADV GFX1013)
 
-Send each coin on its matching network. Coins sent on the wrong network can't be recovered.
-
-> [!NOTE]
-> Donations are voluntary gifts and are non-refundable. A donation does not buy any product, service, perk, early access, exclusive build, priority support or say in the project. Every release stays free and public for everyone.
-
-## Credits and license
-
-Lichii inherits the work of the Eglantine, Eden, yuzu and Sudachi projects and their contributors, including Eglantine's original developer Camille LaVey. Original copyright notices and third-party licenses are retained.
-
-See [LICENSE.txt](LICENSE.txt) and the source files for applicable license terms.
+- Foliage and building walls render (mesh fallback); no white holes.
+- World frame rate ~17-21 fps with flat frame times (occlusion stalls gone), console-speed
+  gameplay via Dynamic FPS; frame generation roughly doubles the presented rate.
