@@ -1,11 +1,34 @@
 # oot-bc250
 
+> **Disclaimer: this project does not support or condone piracy.** No game data, keys,
+> firmware or other copyrighted console assets are included, provided or linked here. The
+> emulator requires you to dump **your own** game, keys and firmware from **your own**
+> console; use it only with backups of content you legally own. Do not open issues about
+> obtaining games, keys or firmware — they will be closed.
+
 A [Lichii](https://github.com/zortos293/Lichii) fork tuned for **The Legend of Zelda:
 Ocarina of Time (Switch 2)** on the **AMD BC-250 console** (GFX1013-class iGPU, RADV,
 1080p TV output, shared-memory 16 GB with a small UMA carve-out).
 
 All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; this repo only
 carries the BC-250-specific deltas on top. GPLv3, like upstream.
+
+## Changelog
+
+- **Narrowed the mesh-emulation pre-dispatch barrier.** The barrier before every emulated
+  mesh draw's compute dispatch drained the entire pipeline (all graphics, compute and
+  transfer stages, all writes) — ~57 full drains per frame in Ocarina of Time, more GPU
+  cost than the dispatches themselves on an iGPU. The mesh programs read compute output,
+  DMA copies and fragment stores; the barrier now covers exactly those sources.
+  `EDEN_NX2_MESH_WIDE_BARRIER=1` restores the wide form.
+- **Empty emulated draws are skipped before doing work.** The game culls on the GPU and
+  hands ~12% of emulated draws zero groups; each one still paid three staging requests,
+  a render-pass break and a pass restart around a no-op. They now return before any of it.
+- **PR #573 AMD performance fixes, ported and RADV-gated.** Upstream gates every fix on
+   AMD's proprietary Windows driver; the BC-250 runs RADV (`VK_DRIVER_ID_MESA_RADV`), so
+   they never fired there. This fork extends the gates (see below).
+- **BC-250 installer and Steam shortcut helper** (`tools/bc250/`): distrobox build, tuned
+  wrapper and per-game config template, and a safe binary `shortcuts.vdf` writer.
 
 ## What this fork adds on top of upstream `nx2`
 
@@ -94,6 +117,24 @@ lineage are picked up when the format version and magic match, and files from ot
 versions are ignored safely. A pre-warmed cache removes most of the first-boot wait
 above; it does **not** raise steady-state performance. The GPU driver keeps its own
 binary cache separately, which rebuilds on first run regardless.
+
+### Controllers
+
+The CLI frontend does not auto-bind gamepads. The installer's `oot.ini` template ships the
+verified Xbox 360 wireless receiver mapping (the common BC-250 setup); a different pad
+needs its own `player_0_*` lines in the `[Controls]` section, or configure the pad once
+with the GUI build and copy the `[Controls]` block over. Every mapping line must carry
+`<key>\default=false` — without it the loader ignores the value.
+
+### Achieving the measured performance
+
+The numbers below assume the installer's wrapper and template exactly: texture-cache
+budgets for the UMA split, the split GPU thread, batched fences, two-frames-ahead pacing,
+shader preloading at boot, handheld docked mode, 8 GB memory layout, GPU Fast accuracy,
+async shaders and presentation, FSR scaling filter with 60% sharpening, FSR3 frame
+generation at 2x capped at 30, Dynamic FPS on (console-speed movement at any frame rate)
+and Max Resolution off (the game's dynamic resolution drops under GPU load). If any of
+those are changed, expect different results.
 
 ## Verified on hardware (BC-250, RADV GFX1013)
 
