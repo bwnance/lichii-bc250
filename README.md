@@ -52,6 +52,49 @@ some upstream source exports, and the build fails without it).
 - FSR3 frame generation (`frame_gen`, type `Fsr3`) works; it acts after the game presents,
   so in-emulator frame counters do not include generated frames.
 
+## Installation on the BC-250
+
+The console runs Bazzite (an immutable OS), so the binary is built inside a distrobox
+container and launched through a small wrapper that sets the tuning for this iGPU.
+
+```sh
+git clone https://github.com/lethevimlet/oot-bc250.git
+cd oot-bc250
+./tools/bc250/bc250-install.sh --with-shortcut --game "<path to your Ocarina of Time dump>"
+```
+
+That creates the `oot-bc250-build` Fedora 42 container, installs the build dependencies in
+it, builds `eden-cli`, installs the wrapper to `~/Applications/oot-bc250/oot-bc250` with the
+tuning in the wrapper and a per-game config template (`oot.ini`), and — with
+`--with-shortcut` — registers the game as a Steam non-Steam shortcut so it launches from
+Gaming Mode with a controller. The shortcut step needs Steam stopped (the installer tells
+you when); the installer never starts or stops Steam for you.
+
+The manual launch, if you prefer no shortcut:
+
+```sh
+~/Applications/oot-bc250/oot-bc250 -f -c ~/Applications/oot-bc250/oot.ini \
+  -g "<path to your Ocarina of Time dump>"
+```
+
+### First launch: 3-5 minutes of black screen
+
+The first boot of the game stays on a **black screen for 3-5 minutes** while the shader
+pipelines are prepared. This is normal, happens once per game version per emulator build,
+and shrinks on later boots as the cache fills. The same applies in smaller form to the
+first minutes of each new area in a session: first-visit content compiles its pipelines
+once (a hitch), and the cost decays session by session. This is the single most common
+"it's broken" report — it isn't; wait it out the first time.
+
+### Shader caches
+
+The pipeline cache lives in `~/.cache/eden/shader/<title id lowercase>/` (for Ocarina of
+Time: `~/.cache/eden/shader/0400486024dec000/`). Caches from other builds of the same
+lineage are picked up when the format version and magic match, and files from other
+versions are ignored safely. A pre-warmed cache removes most of the first-boot wait
+above; it does **not** raise steady-state performance. The GPU driver keeps its own
+binary cache separately, which rebuilds on first run regardless.
+
 ## Verified on hardware (BC-250, RADV GFX1013)
 
 - Foliage and building walls render (mesh fallback); no white holes.
