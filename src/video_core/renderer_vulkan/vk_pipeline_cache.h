@@ -117,6 +117,9 @@ struct ComputePipelineCacheEntry {
     u32 rebuilds{};
     /// Whether a dispatch looked it up yet (kept only with EDEN_NX2_STUTTER_TRACE)
     bool used{};
+    /// A rebuild still compiling: dispatches keep this entry's pipeline until it is ready
+    /// (zortos293/Lichii#969).
+    std::unique_ptr<ComputePipelineCacheEntry> pending;
 
     [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
                                        const ComputePipelineCacheKey& key) const;

@@ -100,6 +100,15 @@ public:
     /// Advances the frame window of EDEN_NX2_UPSCALER_TRACE
     static void TickUpscalerTrace();
 
+    /// Whether the build ended without a pipeline (its module could not be made).
+    [[nodiscard]] bool BuildFailed() const noexcept {
+        return is_built.load(std::memory_order::acquire) && !pipeline;
+    }
+    /// Whether the build ended, with a pipeline or not.
+    [[nodiscard]] bool IsBuilt() const noexcept {
+        return is_built.load(std::memory_order::acquire);
+    }
+
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it
     [[nodiscard]] bool IsBuildTaskDone() const noexcept {
         return !jobs || job.Ready();

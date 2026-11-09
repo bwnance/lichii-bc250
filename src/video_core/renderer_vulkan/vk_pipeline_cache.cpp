@@ -973,6 +973,24 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
     auto& entry{pair->second};
     if (is_new) {
         entry = CreateComputePipeline(key, shader);
+    } else if (entry.pending) {
+        // A rebuild (below) compiles on a worker; switch once it is built (zortos293/Lichii#969:
+        // the next dispatch used to wait for it, up to 2.8 s in Ocarina of Time).
+        if (entry.pending->pipeline->IsBuilt()) {
+            auto rebuilt{std::move(entry.pending)};
+            if (!rebuilt->pipeline->BuildFailed()) {
+                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                       std::move(entry.pipeline));
+                rebuilt->used = entry.used;
+                entry = std::move(*rebuilt);
+            } else {
+                LOG_WARNING(Render_Vulkan, "Keeping compute shader {:016x}: rebuild failed",
+                            key.unique_hash);
+                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                       std::move(rebuilt->pipeline));
+                entry.rebuilds = MaxComputeRebuilds;
+            }
+        }
     } else if (!entry.null_pointer_slots.empty() && entry.rebuilds < MaxComputeRebuilds &&
                StaleNullPointerSlot(entry)) {
         // The translation dropped accesses through a pointer that was null back then. Which slots
@@ -980,13 +998,19 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
         // binds, null now or not: a null pointer binds nothing.
         auto rebuilt{CreateComputePipeline(key, shader, entry.mapped_pointers)};
         if (rebuilt.pipeline) {
-            if (entry.pipeline) {
-                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
-                                                       std::move(entry.pipeline));
-            }
             rebuilt.rebuilds = entry.rebuilds + 1;
             rebuilt.used = entry.used;
-            entry = std::move(rebuilt);
+            if (entry.pipeline && !entry.pipeline->BuildFailed()) {
+                // The current translation keeps dispatching meanwhile: for a few frames it misses
+                // the accesses through the newly filled pointer, instead of a freeze.
+                entry.pending = std::make_unique<ComputePipelineCacheEntry>(std::move(rebuilt));
+            } else {
+                if (entry.pipeline) {
+                    retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                           std::move(entry.pipeline));
+                }
+                entry = std::move(rebuilt);
+            }
         } else {
             // Keep the working translation when the new one cannot be built (for example a
             // narrow access that now stays global across two buffers), and stop retrying.
