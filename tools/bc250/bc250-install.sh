@@ -96,14 +96,15 @@ CONTAINER=oot-bc250-build
 unset LD_PRELOAD
 # The BC-250 iGPU (RADV) with UMA: cap the texture cache so it never tramples
 # the 15 GB of system RAM the game and the compositor also live in.
-export EDEN_NX2_TC_EXPECTED_MIB=4096
-export EDEN_NX2_TC_CRITICAL_MIB=4608
+export EDEN_NX2_TC_EXPECTED_MIB=3072
+export EDEN_NX2_TC_CRITICAL_MIB=3584
+export EDEN_NX2_VSYNC_HZ=30       # the game starts its frames on a 30 Hz tick
 export EDEN_NX2_SWAP_INTERVAL=2   # present every second vblank; the game asks for 30 fps
 export EDEN_VI2_MAX_RESOLUTION_MODE=1  # report the handheld display mode
 export EDEN_NX2_SPLIT=2          # split GPU thread: the back half runs on its own thread
 export EDEN_NX2_FENCE_BATCH=1    # batch GPU fence syncpoints
-export EDEN_NX2_FRAMES_AHEAD=2   # steadier frame pacing, a little input latency
-export EDEN_NX2_PRELOAD_ALL_PIPELINES=1  # build cached pipelines at boot, not on first sight
+export EDEN_NX2_FRAMES_AHEAD=2   # the game runs a frame ahead of the GPU threads: 13.6 -> 21.3 fps
+export EDEN_NX2_PRELOAD_ALL_PIPELINES=0  # cached pipelines build on first sight (boots faster)
 exec distrobox enter "$CONTAINER" -- "$REPO_BUILD_DIR/bin/eden-cli" "$@"
 WRAP
 sed -i "s|__REPO_BUILD_DIR__|$REPO_DIR/build|" "$APP_DIR/oot-bc250"
@@ -137,6 +138,8 @@ frame_gen_flow_scale\default=false
 frame_gen_flow_scale=50
 frame_gen_target_rate\default=false
 frame_gen_target_rate=30
+pin_gpu_threads\default=false
+pin_gpu_threads=true
 scaling_filter\default=false
 scaling_filter=6
 fsr_sharpening_slider\default=false
