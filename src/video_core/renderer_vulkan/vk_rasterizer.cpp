@@ -360,6 +360,20 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
         u32 words;
         std::memcpy(&words, arena.counter.Mapped().data(), sizeof(words));
         const u64 needed{u64{words} * 4};
+        // EDEN_NX2_MESH_ARENA_LOG=1: every 10 s, the most a submission asked for and the arenas.
+        static const bool log_arenas{std::getenv("EDEN_NX2_MESH_ARENA_LOG") != nullptr};
+        if (log_arenas) {
+            static u64 window_max{};
+            static auto next_log{std::chrono::steady_clock::now()};
+            window_max = (std::max)(window_max, needed);
+            if (const auto now{std::chrono::steady_clock::now()}; now >= next_log) {
+                next_log = now + std::chrono::seconds{10};
+                LOG_INFO(Render_Vulkan,
+                         "Mesh arenas: {} of {} MiB, most a submission needed in 10 s: {} KiB",
+                         mesh_arenas.size(), mesh_arena_size >> 20, window_max >> 10);
+                window_max = 0;
+            }
+        }
         if (needed > arena.size && mesh_arena_size < max_size) {
             mesh_arena_size = (std::min)(std::bit_ceil(needed + needed / 4), max_size);
             LOG_INFO(Render_Vulkan, "Mesh emulation: a submission needed {} MiB of output, arenas "

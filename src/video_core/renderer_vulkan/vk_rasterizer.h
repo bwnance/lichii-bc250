@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
 #include <optional>
 #include <string_view>
 
@@ -379,7 +380,14 @@ private:
     };
     std::vector<MeshArena> mesh_arenas;
     size_t mesh_arena_current{~size_t{}};
-    u64 mesh_arena_size{64ULL << 20};
+    /// Starts at EDEN_NX2_MESH_ARENA_MIB (default 16) and grows when a submission needed more.
+    /// Ocarina of Time asked for at most ~10 MiB a submission on the BC-250, which kept six
+    /// arenas (one per submission in flight): 64 MiB ones held 384 MiB, 16 MiB ones 96 MiB.
+    u64 mesh_arena_size{[] {
+        const char* value = std::getenv("EDEN_NX2_MESH_ARENA_MIB");
+        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 16;
+        return (mib != 0 ? mib : 16) << 20;
+    }()};
     /// The current submission's arena, after its counter is reset.
     const MeshArena& AcquireMeshArena();
 
