@@ -117,9 +117,7 @@ if [ ! -f "$APP_DIR/oot.ini" ]; then
 size=1
 1\title_id\default=false
 1\title_id=288309953924349952
-1\disabled\size=1
-1\disabled\1\d=Max Resolution (built-in)
-1\disabled\1\d\default=false
+1\disabled\size=0
 
 [Renderer]
 gpu_accuracy\default=false

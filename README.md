@@ -13,7 +13,51 @@ Ocarina of Time (Switch 2)** on the **AMD BC-250 console** (GFX1013-class iGPU, 
 All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; this repo only
 carries the BC-250-specific deltas on top. GPLv3, like upstream.
 
+**Base:** Lichii `nx2` **build 150** (`17baed716d`, 2026-11-10), with this fork's commits on
+top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
+`~/.cache/eden`): see the build 150 notes below.
+
 ## Changelog
+
+### 2026-11-11: Lichii build 150, memory trims, Max Resolution on
+
+Measured on the owner's test (load the save in Kokiri Forest, walk straight ahead for 30 s;
+two runs each): **~25 fps** world rate, peak GPU memory ~6.4-6.5 GB, image noticeably sharper.
+
+- **Rebased on Lichii build 150.** Brings upstream's drain-free semaphore acquires (#949),
+  cheaper per-draw work on the split back thread (#858), memory-reading macros run on the
+  back thread (#1056), staging buffer reuse (#778), the Ocarina **white wash / blown-out
+  lighting** fix (#1236), the ocarina crackle fix (#1196) and stand-ins for damaged texture
+  members (#1197). The fork's own copies of the task/mesh fallback, `MADV_COLD` (#756) and
+  #841 are now upstream's. The fork's macro DMA-read fast path is dropped: upstream's
+  #1056 replaces it (`EDEN_NX2_DMA_READ_DRAIN` / `_RELAXED` no longer exist). Build 150 alone
+  is about 7% faster than the previous build on the walk.
+- **Max Resolution add-on on** (installer template and reference setup). The game renders
+  its scene at full 1080p instead of upscaling a lower resolution; the "dreamy", soft image
+  is gone. No measurable fps or memory cost on the BC-250.
+- **Uneven-mip ASTC stays BC3 on AMD** unless `EDEN_NX2_UNEVEN_ASTC_RGBA8=1`. Upstream
+  (#679) kept such textures as RGBA8 on RADV: Ocarina's two 1365x1365 cube arrays (90
+  layers) became 967 MiB each and the board ran out of memory (peak GPU memory 6.9 GB).
+- **Large ASTC arrays are re-compressed a few layers at a time** (`EDEN_NX2_ASTC_CHUNK_MIB`,
+  default 64): the two 967 MiB decode images at every Kokiri Forest load are gone.
+- **Native compute storage bindings keep the 8 MiB cap** unless
+  `EDEN_NX2_NATIVE_COMPUTE_FULL=1`. Build 150's Mario Kart World fix (#1231) made Ocarina
+  keep one 1 GiB buffer: peak GPU memory 6.3 -> 8.7 GB, more swapping and drops, no visible
+  change.
+- **Mesh emulation arenas start at 16 MiB** (`EDEN_NX2_MESH_ARENA_MIB`; they grow when
+  needed): Ocarina needs at most ~10 MiB a submission but kept six 64 MiB arenas (384 MiB),
+  now 64-80 MiB. `EDEN_NX2_MESH_ARENA_LOG=1` logs the usage.
+- **Freed device memory blocks are kept for reuse** (`EDEN_NX2_MEM_RESERVE_MIB`, default 256,
+  0 = off): new blocks took the kernel 10-58 ms to back while the board's RAM was full.
+  Allocations of 4 ms or more are logged.
+- **Data folder:** build 150 moves its data to `~/.local/share/lichii` and makes eden-cli
+  stop until the Qt GUI imports the old folder. This fork builds eden-cli only, so it keeps
+  the `eden` folders: saves, keys, config and shader caches stay where they are.
+- **Diagnostics:** images of 256 MiB or more are named in the log; upstream's
+  `EDEN_NX2_STUTTER_TRACE=1` attributes every slow frame (it showed the remaining drops are
+  memory pressure: allocations and page-ins while the 16 GB board swaps, not shader builds).
+
+### 2026-11-10: baseline
 
 - **The game runs a frame ahead of the GPU threads (`EDEN_NX2_FRAMES_AHEAD=2`).** The
   wrapper always set 2, but only `1` was parsed, so it meant 0, and `1` itself also waited
@@ -30,8 +74,7 @@ carries the BC-250-specific deltas on top. GPLv3, like upstream.
 - **GPU thread pinning on** (`pin_gpu_threads=true` in the template): the split GPU threads
   get their own cores in the same L3 cluster, the guest cores the rest.
 - **Macro DMA reads drain the GPU back thread only when queued work can change the words**
-  (99.6% of the drains changed nothing). Small gain on its own; `EDEN_NX2_DMA_READ_DRAIN=1`
-  restores the old behaviour, `EDEN_NX2_DMA_READ_RELAXED=1` is an experiment.
+  (99.6% of the drains changed nothing). Replaced by upstream's #1056 since build 150.
 - **Cached task/mesh pipelines build at boot through the compute fallback** (Lichii #841).
 - **Diagnostics:** `EDEN_NX2_PIPELINE_BUILD_TRACE` lines carry wall time and thread name,
   `EDEN_NX2_TC_LOG=<frames>`, `EDEN_NX2_VMA_DUMP=<path>` (VMA allocation map at the peak).
@@ -57,14 +100,17 @@ carries the BC-250-specific deltas on top. GPLv3, like upstream.
    AMD's proprietary Windows driver; the BC-250 runs RADV (`VK_DRIVER_ID_MESA_RADV`), so
    they never fired there. This fork extends the gates:
    - Query-cache copies no longer block on slots where no query ended (9 -> 22 fps on the
-     PR author's 9070 XT; removes the occlusion-culling stalls OoT suffers from).
+     PR author's 9070 XT; removes the occlusion-culling stalls OoT suffers from). Since build
+     150 this is upstream's wait-on-last copy (#679), which this fork extends to RADV, plus
+     a non-blocking host read of query results on RADV.
    - Already-satisfied semaphore acquires skip the split-GPU-thread drain (73% of ~2800/s
      acquires in Kokiri Forest).
    - Native submission budget of 512 draws on RADV.
    - Large texture unswizzles split over helper threads.
    - The Kokiri Forest compute shader builds unoptimized (1.3-4 s stalls on AMD).
    - Async draw discard defaults on for RADV (new pipelines no longer freeze the game).
-2. Based on upstream `nx2` including the merged **task/mesh fallback** (PR #569): the
+2. Based on upstream `nx2` including the merged **task/mesh fallback** (PR #569), plus this
+   fork's narrower pre-dispatch barrier, empty-draw skip and smaller arenas: the
    BC-250's GPU lacks `VK_EXT_mesh_shader`, so without it OoT's foliage, building walls and
    other task/mesh geometry is skipped entirely. With it, the missing geometry renders
    correctly (verified on hardware).
@@ -91,8 +137,9 @@ some upstream source exports, and the build fails without it).
 - The built-in **Dynamic FPS** add-on makes game speed follow wall-clock time, so movement
   stays console-speed below 30 fps; disable it in Add-Ons if you prefer frame-locked timing
   (game then runs slow-motion under 30 fps).
-- The built-in **Max Resolution** add-on pins the internal resolution; leaving it disabled
-  lets the game's dynamic resolution drop under GPU load (recommended on an iGPU).
+- The built-in **Max Resolution** add-on renders the scene at full 1080p (on in the
+  template). Without it the game draws a smaller image and upscales it, which looks soft on a
+  TV; on the BC-250 it costs no measurable fps.
 - FSR3 frame generation (`frame_gen`, type `Fsr3`) works; it acts after the game presents,
   so in-emulator frame counters do not include generated frames.
 
@@ -154,7 +201,7 @@ budgets for the UMA split, the split GPU thread, batched fences, two-frames-ahea
 shader preloading at boot, handheld docked mode, 8 GB memory layout, GPU Fast accuracy,
 async shaders and presentation, FSR scaling filter with 60% sharpening, FSR3 frame
 generation at 2x capped at 30, Dynamic FPS on (console-speed movement at any frame rate)
-and Max Resolution off (the game's dynamic resolution drops under GPU load). If any of
+and Max Resolution on (full 1080p scene). If any of
 those are changed, expect different results.
 
 ## Reference console configuration
@@ -238,8 +285,8 @@ the ones with `sudo` need your password. Each step says how to check it.
 
 5. **Optional: larger kernel GPU-memory (GTT) limit.** The reference console boots with
    `ttm.pages_limit=3145728 ttm.page_pool_size=3145728` (12 GB) because another program on
-   it needed more. Ocarina's GPU memory peaked at about 5 GB, under the default limit
-   (half of RAM, ~7.5 GB), so this is not required:
+   it needed more. Ocarina's GPU memory peaks at about 6.5 GB during an area load, under the
+   default limit (half of RAM, ~7.5 GB) but close to it, so this is recommended:
 
    ```sh
    sudo rpm-ostree kargs --append-if-missing=ttm.pages_limit=3145728 \
@@ -259,6 +306,10 @@ generation disabled).
 ## Verified on hardware (BC-250, RADV GFX1013)
 
 - Foliage and building walls render (mesh fallback); no white holes.
-- World frame rate ~21-23 fps on a 30 s Kokiri Forest walk (was ~12-14 before the
-  frames-ahead fix), console-speed gameplay via Dynamic FPS; frame generation brings the
-  presented rate to the 30 cap. Remaining: short dips while the board runs low on RAM.
+- World frame rate ~25 fps walking straight through Kokiri Forest for 30 s (build 150 base;
+  ~23.5 on the previous base, ~12-14 before the frames-ahead fix), console-speed gameplay via
+  Dynamic FPS; frame generation doubles the presented rate (about 45-50 shown while walking,
+  60 in menus) at no cost to the world rate.
+- Remaining: short dips after area loads. An area load fills the 16 GB of shared memory
+  (guest memory ~5 GB, emulator ~2-3 GB, GPU ~6.5 GB at the peak) and the kernel swaps; the
+  page-ins and slow GPU allocations that follow cause most of the drops that are left.
