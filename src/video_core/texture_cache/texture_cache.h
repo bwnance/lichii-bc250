@@ -403,9 +403,14 @@ void TextureCache<P>::TickFrame() {
     }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
-    static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
+    // EDEN_NX2_TC_LOG=<frames> logs every that many frames instead (e.g. 60 around loads).
+    static const u64 log_tc = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_LOG");
+        const u64 every = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+        return value == nullptr ? 0 : every == 0 ? 600 : every;
+    }();
     static u64 frames{};
-    if (log_tc && ++frames % 600 == 0) {
+    if (log_tc != 0 && ++frames % log_tc == 0) {
         u64 image_bytes{};
         size_t images{};
         std::vector<std::pair<u64, const Image*>> largest;
