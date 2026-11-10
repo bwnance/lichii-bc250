@@ -8,7 +8,9 @@
 
 // yuzu data directories
 
+// BC-250 fork: keeps the eden folders (saves, keys, config, shader caches) where they were.
 #define EDEN_DIR "eden"
+#define EDEN_LEGACY_DIR "eden"
 #define PORTABLE_DIR "user"
 
 // Sub-directories contained within a yuzu data directory
