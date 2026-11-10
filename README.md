@@ -15,6 +15,27 @@ carries the BC-250-specific deltas on top. GPLv3, like upstream.
 
 ## Changelog
 
+- **The game runs a frame ahead of the GPU threads (`EDEN_NX2_FRAMES_AHEAD=2`).** The
+  wrapper always set 2, but only `1` was parsed, so it meant 0, and `1` itself also waited
+  for the current frame whenever the GPU was behind, which on the BC-250 is every frame.
+  The game, the GPU threads and the GPU never overlapped. Kokiri Forest walk: 13.6 -> 21.3
+  fps (same binary). Upstream made Ocarina wait for each frame to avoid one-frame white
+  flashes on an RTX 5080; watch for those.
+- **No more multi-second freezes every few minutes** (port of Lichii #756). Every 30 s the
+  emulator wrote cold guest memory to swap with `MADV_PAGEOUT` while holding the mmap lock,
+  stopping every guest core (audio included) for 3-15 s; it now uses `MADV_COLD`.
+- **Load spikes no longer push the game into swap as hard.** Large staging buffers are
+  sized in 8 MiB steps instead of powers of two and freed promptly: a Kokiri Forest load
+  held 1.1 GiB of mostly empty 256 MiB buffers; now ~70 MiB. Peak GPU memory 5.3 -> ~3.7-4.5 GB.
+- **GPU thread pinning on** (`pin_gpu_threads=true` in the template): the split GPU threads
+  get their own cores in the same L3 cluster, the guest cores the rest.
+- **Macro DMA reads drain the GPU back thread only when queued work can change the words**
+  (99.6% of the drains changed nothing). Small gain on its own; `EDEN_NX2_DMA_READ_DRAIN=1`
+  restores the old behaviour, `EDEN_NX2_DMA_READ_RELAXED=1` is an experiment.
+- **Cached task/mesh pipelines build at boot through the compute fallback** (Lichii #841).
+- **Diagnostics:** `EDEN_NX2_PIPELINE_BUILD_TRACE` lines carry wall time and thread name,
+  `EDEN_NX2_TC_LOG=<frames>`, `EDEN_NX2_VMA_DUMP=<path>` (VMA allocation map at the peak).
+
 - **Narrowed the mesh-emulation pre-dispatch barrier.** The barrier before every emulated
   mesh draw's compute dispatch drained the entire pipeline (all graphics, compute and
   transfer stages, all writes) — ~57 full drains per frame in Ocarina of Time, more GPU
@@ -143,16 +164,21 @@ installer's wrapper and config *plus* these settings):
 
 | Setting | Value |
 |---|---|
-| Memory | 16 GB total; **UMA carve-out 1024 MB** (~14.7 GB system RAM) |
+| Memory | 16 GB total; **UMA carve-out 512 MB** (~15.2 GB system RAM) |
+| Swap | zram plus a disk swapfile; **`vm.swappiness=10`** (Bazzite's default is 180) |
 | CPU | All 8 cores enabled (stock boots with 6) |
 | GPU compute units | 40 (all WGPs routed) |
 | GPU clocks | 500–2000 MHz governor range (stock caps at 1850) |
 
 Notes:
-- The 1024 MB carve-out is the biggest single lever: the game's guest memory plus the
+- The small carve-out is the biggest single lever: the game's guest memory plus the
   texture cache does not fit in the stock 6 GB carve-out alongside the OS, and the
-  emulator OOM-kills. At 1024 MB the GPU spills into shared memory, which this workload
-  tolerates well.
+  emulator OOM-kills. The GPU spills into shared memory, which this workload tolerates
+  well; it used ~330 MB of a 1024 MB carve-out, so 512 MB gives the system 0.5 GB more.
+- Memory is still the limit: the emulator holds ~7 GB of RAM plus 3.5-4.5 GB of GPU memory.
+  With swappiness 180 the kernel swapped game memory out with 1 GB of RAM still free, and
+  touching it again cost seconds at 1-17 fps. `/etc/sysctl.d/99-bc250-swappiness.conf`
+  with `vm.swappiness = 10` keeps it in RAM and drops file cache first.
 - 2000 MHz over the stock 1850 is stable for emulation on this box, but it is outside the
   image's default for a reason: watch your temperatures. If yours runs hotter, drop back
   to 1850.
@@ -161,5 +187,6 @@ Notes:
 ## Verified on hardware (BC-250, RADV GFX1013)
 
 - Foliage and building walls render (mesh fallback); no white holes.
-- World frame rate ~17-21 fps with flat frame times (occlusion stalls gone), console-speed
-  gameplay via Dynamic FPS; frame generation roughly doubles the presented rate.
+- World frame rate ~21-23 fps on a 30 s Kokiri Forest walk (was ~12-14 before the
+  frames-ahead fix), console-speed gameplay via Dynamic FPS; frame generation brings the
+  presented rate to the 30 cap. Remaining: short dips while the board runs low on RAM.
