@@ -9,6 +9,9 @@
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -434,20 +437,150 @@ u64 AllocatedUsage(VkDeviceSize driver_usage, const VmaBudget& vma_budget) {
 PFN_vkAllocateMemory g_vma_allocate_memory{};
 PFN_vkFreeMemory g_vma_free_memory{};
 
+// Device memory VMA frees, kept for its next allocation of the same type, size and flags. With
+// the BC-250's memory full, the kernel took 10-42 ms to back each new block while textures
+// streamed in (and freed the blocks the texture cache emptied a moment before). Only memory the
+// host doesn't map and that isn't dedicated to one resource (VMA's shared blocks) is kept, up to
+// EDEN_NX2_MEM_RESERVE_MIB (default 256, 0: off), oldest freed first beyond that.
+struct MemoryReserve {
+    struct Key {
+        u32 type{};
+        VkDeviceSize size{};
+        VkMemoryAllocateFlags flags{};
+        float priority{-1.0f};
+        bool operator==(const Key&) const = default;
+    };
+    struct Entry {
+        Key key;
+        VkDeviceMemory memory;
+    };
+    std::mutex mutex;
+    u32 recyclable_types{}; ///< Memory types the host doesn't see
+    u64 cap{};
+    u64 held{};
+    std::deque<Entry> entries;
+    std::unordered_map<VkDeviceMemory, Key> live; ///< Recyclable allocations in use
+    u64 hits{}, misses{}, slow{};
+    std::chrono::steady_clock::time_point last_report{};
+};
+MemoryReserve g_memory_reserve;
+
+/// The key under which an allocation can be reused, or nullopt when its pNext chain asks for
+/// anything else (dedicated, exported, imported memory).
+std::optional<MemoryReserve::Key> ReserveKey(const VkMemoryAllocateInfo& info) {
+    if ((g_memory_reserve.recyclable_types & (1U << info.memoryTypeIndex)) == 0 ||
+        info.allocationSize > (VkDeviceSize{64} << 20)) {
+        return std::nullopt;
+    }
+    MemoryReserve::Key key{.type = info.memoryTypeIndex, .size = info.allocationSize};
+    for (auto* next = static_cast<const VkBaseInStructure*>(info.pNext); next != nullptr;
+         next = next->pNext) {
+        if (next->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO) {
+            key.flags = reinterpret_cast<const VkMemoryAllocateFlagsInfo*>(next)->flags;
+        } else if (next->sType == VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT) {
+            key.priority = reinterpret_cast<const VkMemoryPriorityAllocateInfoEXT*>(next)->priority;
+        } else {
+            return std::nullopt;
+        }
+    }
+    return key;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device,
                                                    const VkMemoryAllocateInfo* allocate_info,
                                                    const VkAllocationCallbacks* allocator,
                                                    VkDeviceMemory* memory) {
     using namespace VideoCommon::StutterTrace;
     const SiteScope site{Site::MemoryAllocate};
-    return g_vma_allocate_memory(device, allocate_info, allocator, memory);
+    auto& reserve = g_memory_reserve;
+    const auto key = reserve.cap != 0 ? ReserveKey(*allocate_info) : std::nullopt;
+    if (key) {
+        std::scoped_lock lock{reserve.mutex};
+        const auto it = std::ranges::find(reserve.entries, *key, &MemoryReserve::Entry::key);
+        if (it != reserve.entries.end()) {
+            *memory = it->memory;
+            reserve.held -= key->size;
+            reserve.entries.erase(it);
+            reserve.live.emplace(*memory, *key);
+            ++reserve.hits;
+            return VK_SUCCESS;
+        }
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const VkResult result = g_vma_allocate_memory(device, allocate_info, allocator, memory);
+    const auto end = std::chrono::steady_clock::now();
+    std::scoped_lock lock{reserve.mutex};
+    if (result == VK_SUCCESS && key) {
+        reserve.live.emplace(*memory, *key);
+        ++reserve.misses;
+    }
+    const auto ms = std::chrono::duration<double, std::milli>(end - start).count();
+    if (ms >= 4.0 && reserve.slow++ < 200) {
+        LOG_INFO(Render_Vulkan,
+                 "Slow device memory allocation: {:.1f} ms, {} KiB, type {}, {}, reserve {} MiB",
+                 ms, allocate_info->allocationSize >> 10, allocate_info->memoryTypeIndex,
+                 key ? "shared block" : "not reusable", reserve.held >> 20);
+    }
+    if (reserve.cap != 0 && end - reserve.last_report > std::chrono::seconds{30}) {
+        reserve.last_report = end;
+        LOG_INFO(Render_Vulkan, "Device memory reserve: {} reused, {} new, {} MiB held",
+                 reserve.hits, reserve.misses, reserve.held >> 20);
+    }
+    return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memory,
                                            const VkAllocationCallbacks* allocator) {
     using namespace VideoCommon::StutterTrace;
     const SiteScope site{Site::MemoryFree};
+    auto& reserve = g_memory_reserve;
+    if (reserve.cap != 0 && memory != VK_NULL_HANDLE) {
+        std::vector<VkDeviceMemory> release;
+        {
+            std::scoped_lock lock{reserve.mutex};
+            const auto it = reserve.live.find(memory);
+            if (it != reserve.live.end()) {
+                const MemoryReserve::Key key = it->second;
+                reserve.live.erase(it);
+                reserve.entries.push_back({key, memory});
+                reserve.held += key.size;
+                while (reserve.held > reserve.cap) {
+                    release.push_back(reserve.entries.front().memory);
+                    reserve.held -= reserve.entries.front().key.size;
+                    reserve.entries.pop_front();
+                }
+                memory = VK_NULL_HANDLE;
+            }
+        }
+        for (VkDeviceMemory old : release) {
+            g_vma_free_memory(device, old, allocator);
+        }
+        if (memory == VK_NULL_HANDLE) {
+            return;
+        }
+    }
     g_vma_free_memory(device, memory, allocator);
+}
+
+void SetUpMemoryReserve(const VkPhysicalDeviceMemoryProperties& properties) {
+    const char* value = std::getenv("EDEN_NX2_MEM_RESERVE_MIB");
+    g_memory_reserve.cap = (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;
+    g_memory_reserve.recyclable_types = 0;
+    for (u32 type = 0; type < properties.memoryTypeCount; ++type) {
+        if ((properties.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+            g_memory_reserve.recyclable_types |= 1U << type;
+        }
+    }
+}
+
+void ReleaseMemoryReserve(VkDevice device) {
+    std::scoped_lock lock{g_memory_reserve.mutex};
+    for (const auto& entry : g_memory_reserve.entries) {
+        g_vma_free_memory(device, entry.memory, nullptr);
+    }
+    g_memory_reserve.entries.clear();
+    g_memory_reserve.held = 0;
+    g_memory_reserve.live.clear();
 }
 
 } // Anonymous namespace
@@ -836,6 +969,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     g_vma_free_memory = dld.vkFreeMemory;
     functions.vkAllocateMemory = TimedAllocateMemory;
     functions.vkFreeMemory = TimedFreeMemory;
+    SetUpMemoryReserve(physical.GetMemoryProperties().memoryProperties);
 
     VmaAllocatorCreateFlags flags = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
     if (extensions.memory_budget) {
@@ -901,6 +1035,7 @@ Device::~Device() {
         }
     }
     vmaDestroyAllocator(allocator);
+    ReleaseMemoryReserve(*logical);
 }
 
 VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
