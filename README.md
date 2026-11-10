@@ -184,6 +184,78 @@ Notes:
   to 1850.
 - The GPU's minimum 500 MHz saves ~10 W at idle and does not affect load performance.
 
+## Matching the reference setup, step by step
+
+The emulator build and its launcher come from the installer (above). These are the system
+changes outside the emulator that the reference console has. Run them on the BC-250 itself;
+the ones with `sudo` need your password. Each step says how to check it.
+
+1. **UMA carve-out 512 MB.** The carve-out lives in the board's CMOS, not on the disk, so it
+   survives OS reinstalls and needs a reboot to apply. With
+   [bc250_memcfg](https://github.com/fanoush/bc250_memcfg) (build it from source):
+
+   ```sh
+   sudo bc250memcfg UMA_SIZE 512     # written now, used from the next boot
+   sudo systemctl reboot
+   ```
+
+   Check: `cat /sys/class/drm/card1/device/mem_info_vram_total` shows `536870912`, and
+   `free -m` shows about 15 GB of RAM. (Your card may be `card0`.)
+
+2. **Swap: zram plus a disk swapfile.** Bazzite already sets up zram (compressed swap in
+   RAM). Add a disk swapfile as a safety net so a long session can't run out of memory
+   outright. On Bazzite `/var` is btrfs, and btrfs needs a dedicated subvolume for a
+   swapfile:
+
+   ```sh
+   sudo btrfs subvolume create /var/swap
+   sudo btrfs filesystem mkswapfile --size 16g /var/swap/swapfile
+   sudo swapon --priority 10 /var/swap/swapfile
+   echo '/var/swap/swapfile none swap defaults,pri=10 0 0' | sudo tee -a /etc/fstab
+   ```
+
+   Priority 10 keeps zram (priority 100) in use first; the disk is only touched once zram
+   is full. Check: `swapon --show` lists both.
+
+3. **Swappiness 10.** This is the setting that removed most of the multi-second drops.
+   Bazzite ships `vm.swappiness=180` (good for zram on a desktop), which on this board
+   pushed the game's own memory out to swap while RAM was still free; touching that memory
+   again stalled the game for seconds. At 10 the kernel drops file cache first and keeps
+   the game in RAM:
+
+   ```sh
+   printf 'vm.swappiness = 10\n' | sudo tee /etc/sysctl.d/99-bc250-swappiness.conf
+   sudo sysctl --system
+   ```
+
+   The file name must sort after Bazzite's `/usr/lib/sysctl.d/65-memory.conf`, which sets
+   180. Check: `cat /proc/sys/vm/swappiness` shows `10`, also after a reboot.
+
+4. **8 CPU cores, 40 compute units, GPU clock range 500-2000 MHz.** See the table above;
+   the BC-250 community tools (core/CU unlock, the image's `cyan-skillfish-governor-smu`
+   config) set these. The core unlock is undone by a cold boot (power cut) and needs a warm
+   reboot to apply. Check: `nproc` shows `16`.
+
+5. **Optional: larger kernel GPU-memory (GTT) limit.** The reference console boots with
+   `ttm.pages_limit=3145728 ttm.page_pool_size=3145728` (12 GB) because another program on
+   it needed more. Ocarina's GPU memory peaked at about 5 GB, under the default limit
+   (half of RAM, ~7.5 GB), so this is not required:
+
+   ```sh
+   sudo rpm-ostree kargs --append-if-missing=ttm.pages_limit=3145728 \
+       --append-if-missing=ttm.page_pool_size=3145728
+   ```
+
+6. **Connect the controller before you start the game.** The emulator only picks up the
+   pad that is connected at launch; plug in or pair the Xbox 360 receiver first, or the
+   game will get no input.
+
+Things that made no difference on this board, so you can skip them: a lower internal
+resolution or a smaller texture cache budget (memory and fps stay the same), pinning the
+GPU clock to maximum (the GPU is not the limit), and the newer Fritchii v5 builds (they
+are tuned for desktop GPUs with their own memory and run slower here, with frame
+generation disabled).
+
 ## Verified on hardware (BC-250, RADV GFX1013)
 
 - Foliage and building walls render (mesh fallback); no white holes.
