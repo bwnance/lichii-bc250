@@ -4201,7 +4201,15 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // Mario Kart World's lighting passes read past 8 MiB from theirs: capped there, the
             // reads came back zero and lit land and characters too dark. Written bindings keep
             // a cap: a write marks the whole binding GPU-modified.
-            const bool native_compute = native_pointer && compute;
+            // BC-250 fork: opt-in (EDEN_NX2_NATIVE_COMPUTE_FULL=1). In Ocarina of Time it made the
+            // buffer cache keep one 1 GiB buffer, +2.4 GB peak GPU memory on a 16 GB shared-memory
+            // board (more swapping, more drops) with no visible change; the 8 MiB cap below is the
+            // build 130 behaviour.
+            static const bool full_native_compute = [] {
+                const char* value = std::getenv("EDEN_NX2_NATIVE_COMPUTE_FULL");
+                return value != nullptr && value[0] == '1';
+            }();
+            const bool native_compute = native_pointer && compute && full_native_compute;
             if ((table_pointer || native_compute) && !is_written) {
                 const u64 reach = (std::min)(runtime.GetMaxStorageBufferRange(), u64{1_GiB});
                 const u32 limit = static_cast<u32>(reach - (std::min)(reach, u64{64_KiB}));
