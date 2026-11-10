@@ -2,12 +2,17 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <mutex>
 #include <span>
 #include <thread>
+
+#ifdef __linux__
+#include <pthread.h>
+#endif
 
 #include "common/common_types.h"
 
@@ -28,9 +33,18 @@ inline void TracePipelineBuild(const char* phase, const char* kind, u64 key_hash
     }
     static std::mutex mutex;
     std::scoped_lock lock{mutex};
-    std::fprintf(file, "%s %s pipeline=%016llx thread=%zu%s", phase, kind,
+    // Wall-clock seconds and the thread's name, to line builds up with frame drops: a build on
+    // the GPU thread (GPU, GPUBack) stalls the frame, one on a worker does not.
+    const double now = std::chrono::duration<double>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+    char name[32] = "?";
+#ifdef __linux__
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+    std::fprintf(file, "%.3f %s %s pipeline=%016llx thread=%zu name=%s%s", now, phase, kind,
                  static_cast<unsigned long long>(key_hash),
-                 std::hash<std::thread::id>{}(std::this_thread::get_id()),
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()), name,
                  unoptimized ? " unoptimized" : "");
     for (size_t stage = 0; stage < stage_hashes.size(); ++stage) {
         if (stage_hashes[stage] != 0) {

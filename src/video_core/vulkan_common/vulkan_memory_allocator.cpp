@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <string>
+#include <cstdlib>
+#include <cstdio>
 #include <array>
 #include <bit>
 #include <limits>
@@ -730,6 +733,28 @@ void LogMemoryStatistics(const Device& device) {
     }
     std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
     vmaGetHeapBudgets(allocator, budgets.data());
+    // EDEN_NX2_VMA_DUMP=<path> (diagnostic): VMA's detailed map of every allocation, written to
+    // <path>.1.json the first time the heaps hold over 3 GiB and <path>.2.json 60 calls later.
+    static const char* const dump_path = std::getenv("EDEN_NX2_VMA_DUMP");
+    static int dumps{};
+    static int since_first{};
+    if (dump_path != nullptr && dumps < 2) {
+        u64 usage{};
+        for (u32 heap = 0; heap < properties->memoryHeapCount; ++heap) {
+            usage += budgets[heap].usage;
+        }
+        if ((dumps == 0 && usage > (3ULL << 30)) || (dumps == 1 && ++since_first >= 60)) {
+            char* json{};
+            vmaBuildStatsString(allocator, &json, VK_TRUE);
+            const std::string path = fmt::format("{}.{}.json", dump_path, ++dumps);
+            if (std::FILE* file = std::fopen(path.c_str(), "w")) {
+                std::fputs(json, file);
+                std::fclose(file);
+            }
+            vmaFreeStatsString(allocator, json);
+            LOG_INFO(Render_Vulkan, "VMA map written to {} ({} MiB in use)", path, usage >> 20);
+        }
+    }
     for (u32 heap = 0; heap < properties->memoryHeapCount; ++heap) {
         LOG_INFO(Render_Vulkan, "VMA heap {}: usage {} MiB of budget {} MiB, VMA blocks {} MiB",
                  heap, budgets[heap].usage >> 20, budgets[heap].budget >> 20,
