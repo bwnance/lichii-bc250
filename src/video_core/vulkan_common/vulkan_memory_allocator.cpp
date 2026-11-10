@@ -263,6 +263,15 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     const bool huge = texels > MaxBackedImageTexels;
     VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+    if (result == VK_SUCCESS && alloc_info.size >= (u64{256} << 20)) {
+        // Images of 256 MiB and more are rare and dominate device memory: name them.
+        LOG_INFO(Render_Vulkan,
+                 "Large image {} MiB: {}x{}x{} ({} levels, {} layers, {} samples, format {}, "
+                 "usage {:#x}, flags {:#x}, type {})",
+                 alloc_info.size >> 20, ci.extent.width, ci.extent.height, ci.extent.depth,
+                 ci.mipLevels, ci.arrayLayers, static_cast<u32>(ci.samples),
+                 static_cast<u32>(ci.format), ci.usage, ci.flags, static_cast<u32>(ci.imageType));
+    }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
         // it out rather than failing the draw and aborting.

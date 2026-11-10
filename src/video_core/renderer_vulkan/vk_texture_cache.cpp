@@ -227,9 +227,15 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
 
 // ASTC that would be re-compressed to BC1/BC3 but has uneven block mips (HasUnevenBlockMips) on
 // an AMD driver, which samples those wrong: kept as the GPU decoder's RGBA8 instead, like huge
-// arrays.
+// arrays. Opt-in here (EDEN_NX2_UNEVEN_ASTC_RGBA8=1): on the BC-250 (RADV, 16 GB shared) Ocarina
+// of Time's two 1365x1365 cube arrays (11 levels, 90 layers) then take 967 MiB each instead of
+// ~110 MiB as BC3, and the game runs out of memory and swaps; BC3 showed no visible fault there.
 [[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
-    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_UNEVEN_ASTC_RGBA8");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled || !IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
         info.type != ImageType::e2D || info.size.depth != 1 || info.resources.levels <= 1 ||
         Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
         Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed) {
