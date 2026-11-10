@@ -161,7 +161,16 @@ public:
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {
         last_writer_position = write_position;
+        last_memory_writer_position = write_position;
     }
+    /// Work that writes guest memory without writing command lists (3D uploads and reports,
+    /// inline-to-memory and 2D copies) was just sent. Macro DMA reads wait for it.
+    void NoteMemoryWriter() {
+        last_memory_writer_position = write_position;
+    }
+    /// Waits until the back executed every memory-writing method sent so far. Returns whether
+    /// any of it was still queued.
+    bool WaitForMemoryWriters(DrainSite site);
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
     bool WaitForWriters();
@@ -246,6 +255,7 @@ private:
     // Front side.
     u64 write_position{};
     u64 last_writer_position{};
+    u64 last_memory_writer_position{};
     u64 last_sync_position{};
     u64 published_local{};
     u64 consumed_cache{};

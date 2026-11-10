@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <unordered_set>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -1045,6 +1046,14 @@ struct Maxwell3D::FrontState {
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
     /// The back's draw manager is in an instance loop (DrawMode::Instance): draw.end does nothing.
     bool instance_loop{};
+    /// GPU pages that reports were sent to since a macro DMA read last flushed them: the query
+    /// cache may write them later (FrontDmaRead).
+    std::unordered_set<u64> report_pages;
+    u64 dma_reads_fast{};
+    u64 dma_reads_slow{};
+    u64 dma_slow_reported{};
+    u64 dma_slow_gpu_written{};
+    u64 dma_fast_waited{};
 };
 
 namespace {
@@ -1213,6 +1222,26 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     } else {
         split.Method(this, method, argument, is_last_call, nullptr);
     }
+    FrontNoteMemoryWrite(split, fs, method);
+}
+
+void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(report_semaphore.query): {
+        const GPUVAddr address =
+            (GPUVAddr{fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)] & 0x1ffffff} << 32) |
+            fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)];
+        fs.report_pages.insert(address >> 12);
+        split.NoteMemoryWriter();
+        break;
+    }
+    case MAXWELL3D_REG_INDEX(launch_dma):
+    case MAXWELL3D_REG_INDEX(inline_data):
+        split.NoteMemoryWriter();
+        break;
+    default:
+        break;
+    }
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
@@ -1320,6 +1349,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
         }
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
+    FrontNoteMemoryWrite(split, fs, method);
 }
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1428,6 +1458,66 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
+    // Nearly all of these reads see the same words after a drain as before it (BC-250, Ocarina:
+    // 67 of 17602), and each drain stalled the front until the back emptied its queue. Drain
+    // only when sent work can change the words: reports to their pages (the query cache writes
+    // them late), GPU-written pages (buffer cache), and memory-writing methods still queued.
+    // EDEN_NX2_DMA_READ_DRAIN=1: always drain, as before.
+    static const bool always_drain = std::getenv("EDEN_NX2_DMA_READ_DRAIN") != nullptr;
+    // EDEN_NX2_DMA_READ_RELAXED=1 (experiment): reads of report pages take what memory holds,
+    // without waiting for reports still queued or held (an occlusion count up to a frame old).
+    static const bool relaxed = std::getenv("EDEN_NX2_DMA_READ_RELAXED") != nullptr;
+    const u64 first_page = source >> 12;
+    const u64 last_page = (source + read_bytes - 1) >> 12;
+    bool reported = false;
+    for (u64 page = first_page; page <= last_page && !reported; ++page) {
+        reported = fs.report_pages.contains(page);
+    }
+    bool fast = !always_drain && (!reported || relaxed) && diag_before.empty() &&
+                !VideoCommon::QueryDma::TraceEnabled();
+    fs.dma_slow_reported += reported ? 1 : 0;
+    if (fast) {
+        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes;
+             page += 0x1000) {
+            const auto device = memory_manager.GpuToCpuAddress(page);
+            if (!device || Tegra::Nx2MayBeGpuWritten(*device, 0x1000)) {
+                fast = false;
+                ++fs.dma_slow_gpu_written;
+                break;
+            }
+        }
+    }
+    if (fast) {
+        if (!relaxed) {
+            fs.dma_fast_waited +=
+                split.WaitForMemoryWriters(VideoCommon::DrainSite::MacroDmaRead) ? 1 : 0;
+        }
+        // A queued write may have made the pages GPU-written: then take the drained path.
+        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; fast && page < source + read_bytes;
+             page += 0x1000) {
+            const auto device = memory_manager.GpuToCpuAddress(page);
+            fast = device && !Tegra::Nx2MayBeGpuWritten(*device, 0x1000);
+        }
+    }
+    if (fast) {
+        ++fs.dma_reads_fast;
+        for (u32 i = 0; i < words; ++i) {
+            const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+            if (method == 0x158) {
+                fs.parameters.push_back(word);
+            } else if (ram + i < native_data_ram.size()) {
+                native_data_ram[ram + i] = word;
+            }
+        }
+        return;
+    }
+    if (++fs.dma_reads_slow % 4096 == 0) {
+        LOG_INFO(HW_GPU,
+                 "nx2: macro DMA reads without a drain {} (waited for writers {}), drained {}: "
+                 "reported pages {}, GPU-written pages {} (report pages {})",
+                 fs.dma_reads_fast, fs.dma_fast_waited, fs.dma_reads_slow, fs.dma_slow_reported,
+                 fs.dma_slow_gpu_written, fs.report_pages.size());
+    }
     split.Drain(VideoCommon::DrainSite::MacroDmaRead);
     if (VideoCommon::QueryDma::TraceEnabled()) {
         split.Run(
@@ -1456,6 +1546,9 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source, read_bytes);
         },
         VideoCommon::DrainSite::MacroDmaFlush);
+    for (u64 page = first_page; page <= last_page; ++page) {
+        fs.report_pages.erase(page);
+    }
     u32 changed{};
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
