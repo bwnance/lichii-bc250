@@ -59,6 +59,7 @@ private:
         MemoryUsage usage;
         u32 log2_level;
         u64 index;
+        VkDeviceSize capacity{}; ///< The buffer's size (device-local ones are not mapped)
         u64 tick = 0;
         bool deferred{};
 
@@ -82,6 +83,11 @@ private:
     };
 
     static constexpr size_t NUM_LEVELS = sizeof(size_t) * CHAR_BIT;
+    /// Staging buffers over 2^23 bytes (8 MiB) are sized to 8 MiB steps (CreateStagingBuffer).
+    static constexpr u32 LargeStagingLog2 = 23;
+    static constexpr VkDeviceSize LargeStagingGranularity = 8ULL << 20;
+    /// Idle large staging buffers kept per memory usage between frames.
+    static constexpr VkDeviceSize LargeStagingReserve = 64ULL << 20;
     using StagingBuffersCache = std::array<StagingBuffers, NUM_LEVELS>;
 
     StagingBufferRef GetStreamBuffer(size_t size);
@@ -100,6 +106,8 @@ private:
     void ReleaseCache(MemoryUsage usage);
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
+    /// Frees idle large staging buffers, keeping up to `keep` bytes of them.
+    void ReleaseIdleLarge(StagingBuffersCache& cache, VkDeviceSize keep);
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
     }

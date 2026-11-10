@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -145,6 +146,36 @@ void StagingBufferPool::TickFrame() {
     ReleaseCache(MemoryUsage::DeviceLocal);
     ReleaseCache(MemoryUsage::Upload);
     ReleaseCache(MemoryUsage::Download);
+    static const bool pow2 = std::getenv("EDEN_NX2_STAGING_POW2") != nullptr;
+    if (!pow2) {
+        for (StagingBuffersCache* cache : {&device_local_cache, &upload_cache, &download_cache}) {
+            ReleaseIdleLarge(*cache, LargeStagingReserve);
+        }
+    }
+}
+
+void StagingBufferPool::ReleaseIdleLarge(StagingBuffersCache& cache, VkDeviceSize keep) {
+    // Largest levels first, so the reserve keeps the largest idle buffers (most likely to fit again).
+    VkDeviceSize kept = 0;
+    for (size_t log2 = NUM_LEVELS; log2-- > LargeStagingLog2 + 1;) {
+        auto& staging = cache[log2];
+        auto& entries = staging.entries;
+        const auto end = std::remove_if(entries.begin(), entries.end(), [&](const StagingBuffer& entry) {
+            if (entry.deferred || !scheduler.IsFree(entry.tick)) {
+                return false;
+            }
+            if (kept + entry.capacity <= keep) {
+                kept += entry.capacity;
+                return false;
+            }
+            return true;
+        });
+        if (end != entries.end()) {
+            entries.erase(end, entries.end());
+            staging.delete_index = 0;
+            staging.iterate_index = 0;
+        }
+    }
 }
 
 StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
@@ -203,8 +234,8 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
                                                                         bool deferred) {
     StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
 
-    const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+    const auto is_free = [this, size](const StagingBuffer& entry) {
+        return !entry.deferred && entry.capacity >= size && scheduler.IsFree(entry.tick);
     };
     auto& entries = cache_level.entries;
     const auto hint_it = entries.begin() + cache_level.iterate_index;
@@ -224,11 +255,22 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
 
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred) {
     auto const log2_size = Common::Log2Ceil<u32>(u32(size));
+    // Large buffers take the size asked rounded to 8 MiB, not to a power of two: a load of the
+    // BC-250's Kokiri Forest held 1.1 GiB of 256 MiB staging buffers, mostly unused, on a board
+    // that then swapped the game's memory out (seconds at 1-17 fps). Idle large buffers are freed
+    // before a new one is made. EDEN_NX2_STAGING_POW2=1: powers of two, as before.
+    static const bool pow2 = std::getenv("EDEN_NX2_STAGING_POW2") != nullptr;
+    const bool large = !pow2 && log2_size > LargeStagingLog2;
+    const VkDeviceSize buffer_size =
+        large ? Common::AlignUp(VkDeviceSize{size}, LargeStagingGranularity) : 1ULL << log2_size;
+    if (large) {
+        ReleaseIdleLarge(GetCache(usage), 0);
+    }
     VkBufferCreateInfo buffer_ci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = 1ULL << log2_size,
+        .size = buffer_size,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -260,6 +302,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .usage = usage,
         .log2_level = log2_size,
         .index = unique_ids++,
+        .capacity = buffer_size,
         .tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick(),
         .deferred = deferred,
     });
