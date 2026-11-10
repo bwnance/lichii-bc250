@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -1017,7 +1018,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
 
-        if (!device.IsExtMeshShaderSupported() &&
+        // Lichii #841: cached task/mesh pipelines can use the compute fallback too.
+        // The experiment switch restores the old filter for controlled comparisons.
+        static const bool skip_fallback_cache = [] {
+            const char* value = std::getenv("BC250_SKIP_MESH_CACHE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (skip_fallback_cache && !device.IsExtMeshShaderSupported() &&
             std::ranges::any_of(envs, [](const FileEnvironment& env) {
                 return env.ShaderStage() == Shader::Stage::Task ||
                        env.ShaderStage() == Shader::Stage::Mesh;
