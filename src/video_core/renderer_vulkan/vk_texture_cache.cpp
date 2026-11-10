@@ -5131,6 +5131,23 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     const u32 height = info.size.height;
     const u32 levels = static_cast<u32>(HostMipCount(info));
     const u32 layers = static_cast<u32>(info.resources.layers);
+    // Large arrays are decoded a few layers at a time into one small RGBA8 image, each range
+    // encoded straight into its place in the output. Whole, Ocarina of Time's two 1365x1365 cube
+    // arrays (11 levels, 90 layers) needed a 967 MiB decode image each while a load already filled
+    // the BC-250's memory. EDEN_NX2_ASTC_CHUNK_MIB=<MiB> sets the decode image's size (default 64,
+    // 0: the whole image at once).
+    static const u64 chunk_bytes = [] {
+        const char* value = std::getenv("EDEN_NX2_ASTC_CHUNK_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{64}) << 20;
+    }();
+    u64 layer_rgba8 = 0;
+    for (u32 level = 0; level < levels; ++level) {
+        layer_rgba8 += u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
+    }
+    const u32 chunk_layers =
+        chunk_bytes == 0 ? layers
+                         : static_cast<u32>(std::clamp<u64>(chunk_bytes / (std::max)(layer_rgba8, u64{1}),
+                                                           1, layers));
     // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
     // its storage image view must have the matching R8G8B8A8_UNORM format.
     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -5138,7 +5155,8 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
     // shared blocks 90 us, but freeing them there left ~1 GB of those blocks unused.
     const auto reusable = std::ranges::find_if(free_transcodes, [&](const PendingTranscode& t) {
-        return t.width == width && t.height == height && t.levels == levels && t.layers == layers;
+        return t.width == width && t.height == height && t.levels == levels &&
+               t.layers == chunk_layers;
     });
     PendingTranscode pending;
     if (reusable != free_transcodes.end()) {
@@ -5153,7 +5171,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .format = DecodeFormat,
             .extent = {width, height, 1},
             .mipLevels = levels,
-            .arrayLayers = layers,
+            .arrayLayers = chunk_layers,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_STORAGE_BIT,
@@ -5187,7 +5205,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .width = width,
             .height = height,
             .levels = levels,
-            .layers = layers,
+            .layers = chunk_layers,
             .unused_frames = 0,
         };
         for (u32 level = 0; level < levels; ++level) {
@@ -5195,17 +5213,6 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                 MakeStorageView(device.GetLogical(), level, *pending.image, DecodeFormat));
         }
     }
-    astc_decoder_pass->AssembleInto(
-        info, 0, image.guest_size_bytes,
-        ASTCDecoderPass::Target{
-            .image = *pending.image,
-            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .initialized = false,
-            .level_view = [&pending](s32 level) { return *pending.views[level]; },
-            .wait = true,
-            .levels = levels,
-        },
-        map, swizzles);
 
     // Encode every level into one buffer, then copy it into the image.
     const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
@@ -5235,10 +5242,35 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         total += size;
     }
     const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
-    for (u32 level = 0; level < levels; ++level) {
-        bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
-                                copies[level].image_extent.height, layers, bc3, output.buffer,
-                                output.offset, total, copies[level].buffer_offset);
+    for (u32 first = 0; first < layers; first += chunk_layers) {
+        const u32 count = (std::min)(chunk_layers, layers - first);
+        // The decoder reads `count` layers from the first one's data on (layer_stride apart).
+        ImageInfo chunk_info = info;
+        chunk_info.resources.layers = static_cast<s32>(count);
+        StagingBufferRef chunk_map = map;
+        chunk_map.offset += u64{first} * info.layer_stride;
+        astc_decoder_pass->AssembleInto(
+            chunk_info, 0,
+            count == layers ? image.guest_size_bytes : size_t{count} * info.layer_stride,
+            ASTCDecoderPass::Target{
+                .image = *pending.image,
+                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                // After the first range: the encoder's reads finish before the next decode.
+                .initialized = first != 0,
+                .level_view = [&pending](s32 level) { return *pending.views[level]; },
+                .wait = true,
+                .levels = levels,
+            },
+            chunk_map, swizzles);
+        for (u32 level = 0; level < levels; ++level) {
+            const u32 blocks_x = Common::DivCeil(copies[level].image_extent.width, 4U);
+            const u32 blocks_y = Common::DivCeil(copies[level].image_extent.height, 4U);
+            bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                    copies[level].image_extent.height, count, bc3, output.buffer,
+                                    output.offset, total,
+                                    copies[level].buffer_offset +
+                                        u64{first} * blocks_x * blocks_y * block_bytes);
+        }
     }
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         const VkMemoryBarrier barrier{
