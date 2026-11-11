@@ -384,6 +384,10 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     // that a resolve produces (no dirty table, no renderer or shader use), so it must not force a
     // full resolve.
     case MAXWELL3D_REG_INDEX(vertex_id_base):
+    // The macro engine's memory-read address (MemAddressA/B, see macro.cpp): only the macro's own
+    // DMA reads use it. OoT's memory-reading macros rewrite it before ~25k draws/s.
+    case 0x154:
+    case 0x155:
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
     case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
@@ -410,6 +414,30 @@ bool Maxwell3D::IsFastDrawVertexBuffer(u32 method) {
            (method >= limits && method < limits + Regs::NumVertexArrays * limit_words);
 }
 
+bool Maxwell3D::ReportMayReachDrawState() const {
+    // A query or semaphore report writes at most 16 bytes at the report address. A delta draw
+    // keeps the texture and sampler headers and the handles it read from constant buffers, so a
+    // report that lands on the header tables or on any bound graphics constant buffer must still
+    // end the delta chain; one into a plain report buffer (occlusion results) leaves it alone.
+    const GPUVAddr begin = regs.report_semaphore.Address();
+    const GPUVAddr end = begin + 16;
+    const auto overlaps = [begin, end](GPUVAddr base, u64 size) {
+        return size != 0 && begin < base + size && base < end;
+    };
+    if (overlaps(regs.tex_header.Address(), (u64{regs.tex_header.limit} + 1) * 32) ||
+        overlaps(regs.tex_sampler.Address(), (u64{regs.tex_sampler.limit} + 1) * 32)) {
+        return true;
+    }
+    for (const auto& stage : state.shader_stages) {
+        for (const auto& buffer : stage.const_buffers) {
+            if (buffer.enabled && overlaps(buffer.address, buffer.size)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
     if (method >= cb_data && method < cb_data + Regs::NumCBData) {
@@ -434,7 +462,8 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
     // ends the delta chain through those checks. OoT wraps ~25k draws/s in them (occlusion tests).
     if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method) &&
         method != MAXWELL3D_REG_INDEX(clear_report_value) &&
-        method != MAXWELL3D_REG_INDEX(render_enable.mode)) {
+        method != MAXWELL3D_REG_INDEX(render_enable.mode) &&
+        (method != MAXWELL3D_REG_INDEX(report_semaphore.query) || ReportMayReachDrawState())) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {

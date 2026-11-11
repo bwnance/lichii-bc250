@@ -3278,6 +3278,8 @@ public:
     static bool IsFastDrawParameter(u32 method);
     /// Methods fast draw records as light changes (constant buffer data and binds).
     static bool IsFastDrawDeltaMethod(u32 method);
+    /// Whether the report the next report_semaphore.query writes can reach what a delta draw keeps.
+    bool ReportMayReachDrawState() const;
     /// A vertex stream's address, size or limit (not its stride or enable).
     static bool IsFastDrawVertexBuffer(u32 method);
     void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
