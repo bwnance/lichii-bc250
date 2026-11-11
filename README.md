@@ -19,6 +19,29 @@ top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
 
 ## Changelog
 
+### 2026-11-11 (later): Fritchii v5.6-v5.8.3 ports
+
+Owner's verdict after playing it: "works really well most of the time above 30 fps with just
+2 minor drops to 20 fps, best candidate so far". Measured on the straight Kokiri Forest walk:
+~25 fps world rate (23.2-24.5 before).
+
+- **Hot guest pages stay unprotected** (port of Eglantine f27522bfb9 via Fritchii, `EDEN_NX2_EXP48`,
+  on; `=0` turns it off). Pages the game's CPU rewrites every frame were write-protected after
+  each upload and faulted on the next write; they now stay modified and are uploaded at most
+  once a frame. About +1 fps on the walk, no memory cost. A page written again after its upload
+  reaches the GPU one frame later; no flicker seen in play.
+- **No empty GPU submissions** (`EDEN_NX2_EXP61`, on), counting batched uploads as work.
+- **JIT: dynarmic's IR verification pass skipped** (`EDEN_NX2_JIT_FAST_COMPILE=0` keeps it).
+- **A compute pipeline being rebuilt keeps dispatching** instead of freezing up to ~3 s
+  (Lichii #969).
+- Off by default here: `EDEN_NX2_JIT_WARM=1` (idle cores pre-compile game code: +600 MB RSS and
+  one boot hang in four runs on the BC-250), `EDEN_NX2_IR_POOL_CAP_MIB=<n>` (no effect measured).
+- Not taken: Fritchii's EXP56, EXP58, EXP53, the read throttle switch and the report/fence
+  allocation rework (already covered by this base, specific to Fritchii's texture cache, or
+  tied to features this base doesn't have).
+- Measured: 663 MiB of the ~3.7 GiB of resident guest memory holds only zeros. Lichii's
+  zero-page trim is Windows-only; a safe Linux equivalent is still open.
+
 ### 2026-11-11: Lichii build 150, memory trims, Max Resolution on
 
 Measured on the owner's test (load the save in Kokiri Forest, walk straight ahead for 30 s;
