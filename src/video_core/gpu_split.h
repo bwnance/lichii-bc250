@@ -293,6 +293,19 @@ public:
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
     bool WaitForWriters();
+    /// The position WaitForWriters waits for.
+    [[nodiscard]] u64 WritersTarget() const {
+        return std::min(last_writer_position, write_position);
+    }
+    /// Whether the back ran everything sent before `target`; publishes what is queued so it gets
+    /// there without the front waiting (a parked channel polls this).
+    bool ReachedPublishing(u64 target) {
+        if (consumed.load(std::memory_order_acquire) >= target) {
+            return true;
+        }
+        Publish();
+        return consumed.load(std::memory_order_acquire) >= target;
+    }
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain, or note it when a release still queued meets them): the
     /// guest's GPU work before it is complete before the commands after it are fetched.

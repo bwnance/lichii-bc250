@@ -175,7 +175,8 @@ public:
     /// Switch 2: true while the channel is suspended, on a semaphore acquire or on the GPU's copy
     /// of a command list it reads next.
     [[nodiscard]] bool HasPendingAcquire() const {
-        return puller.HasPendingAcquire() || pending_list_tick.has_value();
+        return puller.HasPendingAcquire() || pending_list_tick.has_value() ||
+               pending_writer_position.has_value();
     }
     [[nodiscard]] bool CanResumeAcquire();
 
@@ -313,6 +314,9 @@ public:
     VideoCore::RasterizerInterface* rasterizer = nullptr;
     /// Host GPU tick of the command list copy this channel waits for (ReadGpuWrittenCommands).
     std::optional<u64> pending_list_tick;
+    /// The split position the back must pass before the command list this channel reads next can
+    /// be read (its compute writers): the channel parks instead of the front waiting.
+    std::optional<u64> pending_writer_position;
     /// The entry parsed next was suspended on pending_list_tick, which is done now.
     bool resumed_list_read{};
 
