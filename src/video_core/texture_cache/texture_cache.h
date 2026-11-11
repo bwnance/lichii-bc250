@@ -197,12 +197,20 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         aggressive_mode =
             allow_aggressive && (out_of_memory || total_used_memory >= critical_memory);
         ticks_to_destroy = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
-        // EDEN_NX2_TC_MIN_AGE=<frames>: never evict images used more recently (thrash tests).
+        // Images used in the last EDEN_NX2_TC_MIN_AGE frames (default 300, ~10 s at 30 FPS; 0:
+        // off) are kept, except when device memory ran out. On the BC-250 the cache sits above
+        // its critical threshold for the whole session (thresholds follow free RAM), so the
+        // collector deleted everything unused for 10 frames: Ocarina of Time's 6144x6144 ASTC
+        // texture went out and came back every ~2.6 s as the camera turned, each time a new
+        // image, a 192 MiB decode and a 50-190 ms frame. With 300: route-2 frames over 100 ms
+        // 8-11 -> 1-2 per run, for a device-memory peak ~0.6 GB higher (4.4 -> 5.0 GB).
         static const u64 min_age = [] {
             const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE");
-            return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+            return value != nullptr ? std::strtoull(value, nullptr, 10) : 300ULL;
         }();
-        ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
+        if (!out_of_memory) {
+            ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
+        }
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
