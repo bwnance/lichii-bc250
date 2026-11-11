@@ -307,7 +307,6 @@ add_library(video_core STATIC
     shader_environment.cpp
     shader_environment.h
     evicted_pointer_slots.h
-    bounded_store.h
     shader_handle_program.h
     shader_jobs.cpp
     shader_jobs.h
