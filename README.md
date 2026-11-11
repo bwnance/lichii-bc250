@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250
+# lichii-bc250 v4
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -28,6 +28,24 @@ top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
 `~/.cache/eden`): see the build 150 notes below.
 
 ## Changelog
+
+The title carries the version of `main`; it goes up by one with every merge into `main`.
+
+### v4 — 2026-11-11 (night): frame generation always 2x (~60 fps on screen)
+
+- The template now sets `frame_gen_target_rate=0`: FSR3 frame generation always adds one
+  frame per game frame (multiplier 2). The old `30` only filled dips below 30 fps, so the
+  screen stayed at ~30. Route 2, 3 runs each: target 30 = game 28.5 / 29.4 fps (walk /
+  spin), screen ~30; **target 0 = game 26.6 / 28.0, screen ~46-60**, frames over 50 and
+  100 ms about the same as with 30.
+- `frame_gen_target_rate=60` is **not** recommended: with any target set the multiplier is
+  ignored and the pacer goes to 3x; each generated frame takes a vsync slot, so the game
+  drops to 60/3 = 20 fps (walk 20.3, ~250 frames over 50 ms, worst up to 635 ms).
+- New log line every 10 s while frame generation is on:
+  `Frame gen output: X game fps + Y generated fps = Z fps`, since the in-emulator counters
+  only count game frames.
+- Cost: one game frame of extra input lag (~35 ms) and the usual interpolation artifacts on
+  fast edges and the HUD. To go back, set `frame_gen_target_rate=30`.
 
 ### 2026-11-11 (evening): stutter fixes, renamed to lichii-bc250
 
@@ -256,7 +274,9 @@ some upstream source exports, and the build fails without it).
   template). Without it the game draws a smaller image and upscales it, which looks soft on a
   TV; on the BC-250 it costs no measurable fps.
 - FSR3 frame generation (`frame_gen`, type `Fsr3`) works; it acts after the game presents,
-  so in-emulator frame counters do not include generated frames.
+  so in-emulator frame counters do not include generated frames (the log reports both every
+  10 s). Keep `frame_gen_target_rate=0` (always 2x); a target of 60 throttles the game to 20 fps
+  (see v4 in the changelog).
 
 ## Installation on the BC-250
 
