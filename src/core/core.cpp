@@ -490,7 +490,11 @@ struct System::Impl {
         // Before the cores start: they read it from their JIT without a lock. Not with a single
         // core (no idle core to compile on) or the debugger, nor where any core's backend lacks
         // it (NCE, 32-bit processes, dynarmic's non-x64 backends).
-        if (kernel.IsMulticore() && !system.DebuggerEnabled()) {
+        // bc250: opt-in (EDEN_NX2_JIT_WARMUP_LIST=1). Every core compiles the whole list, which
+        // costs RAM the 16 GB BC-250 needs for guest memory (swap is what drops frames there).
+        const char* const warmup_env = std::getenv("EDEN_NX2_JIT_WARMUP_LIST");
+        const bool warmup_wanted = warmup_env != nullptr && warmup_env[0] == '1';
+        if (warmup_wanted && kernel.IsMulticore() && !system.DebuggerEnabled()) {
             Kernel::KProcess* const kprocess = process->GetHandle();
             bool supported = true;
             for (size_t core = 0; core < Core::Hardware::NUM_CPU_CORES; ++core) {
