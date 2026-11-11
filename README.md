@@ -324,7 +324,11 @@ Things that made no difference on this board, so you can skip them: a lower inte
 resolution or a smaller texture cache budget (memory and fps stay the same), pinning the
 GPU clock to maximum (the GPU is not the limit), and the newer Fritchii v5 builds (they
 are tuned for desktop GPUs with their own memory and run slower here, with frame
-generation disabled).
+generation disabled), even though some of their individual changes were worth
+porting). Also tested on 2026-11-11 and left out: `lz4` instead of `zstd` for zram (it
+compresses less, so the same swapped data takes more RAM: slow frames on the walk went from
+6 to 10 and the worst from ~150 ms to over 300 ms), a smaller texture cache budget
+(2.5/3 GiB: no change), and Fritchii's JIT warm-up (+600 MB RAM, one boot hang in four runs).
 
 ## Verified on hardware (BC-250, RADV GFX1013)
 
@@ -336,3 +340,13 @@ generation disabled).
 - Remaining: short dips after area loads. An area load fills the 16 GB of shared memory
   (guest memory ~5 GB, emulator ~2-3 GB, GPU ~6.5 GB at the peak) and the kernel swaps; the
   page-ins and slow GPU allocations that follow cause most of the drops that are left.
+  A recorded play session (2026-11-11) tied every drop the owner noticed (camera turns,
+  climbing, throwing a stone) to a burst of swap traffic while new textures streamed in;
+  between them the game ran 32-36 fps with swap idle. Shader compilation played no part.
+- Where the emulator's own memory goes (heaptrack and /proc/PID/smaps, mid-walk): ~1.8 GB
+  resident plus ~1.7 GB swapped. The largest part is the CPU emulator: ~580 MB of translated
+  game code and ~275 MB of its bookkeeping, kept separately for each of the 6 emulated cores.
+  Sharing translated code between cores would be the next big memory saving; it needs a deep
+  change in dynarmic and has not been attempted. About 660 MB of the game's resident memory
+  holds only zeros; there is no race-free way on Linux to release it (Lichii's trim is
+  Windows-only).
