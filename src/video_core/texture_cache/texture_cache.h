@@ -179,6 +179,7 @@ void TextureCache<P>::DeleteSupersededImages() {
             UntrackImage(image, image_id);
         }
         UnregisterImage(image_id);
+        delete_reason = "superseded";
         DeleteImage(image_id, image.scale_tick > frame_tick + 5);
     }
 }
@@ -235,6 +236,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         }
         ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
         UnregisterImage(image_id);
+        delete_reason = "collector";
         DeleteImage(image_id, image.scale_tick > frame_tick + 5);
         if (out_of_memory) {
             return false;
@@ -1451,6 +1453,7 @@ void TextureCache<P>::UnmapMemory(DAddr cpu_addr, size_t size) {
             UntrackImage(image, id);
         }
         UnregisterImage(id);
+        delete_reason = "unmap";
         DeleteImage(id);
     }
     ClearStale(cpu_addr, size);
@@ -3324,6 +3327,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             UntrackImage(overlap, overlap_id);
         }
         UnregisterImage(overlap_id);
+        delete_reason = "overlap";
         DeleteImage(overlap_id);
     }
 
@@ -3508,6 +3512,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             UntrackImage(overlap, copy_object.id);
         }
         UnregisterImage(copy_object.id);
+        delete_reason = "copy";
         DeleteImage(copy_object.id);
     }
 
@@ -4180,6 +4185,24 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     const StutterTrace::SiteScope site{StutterTrace::Site::ImageDelete};
     ImageBase& image = slot_images[image_id];
+    {
+        // Images of EDEN_NX2_LARGE_IMAGE_MIB (default 256) MiB and more: say why they go, since
+        // one made again soon after costs a whole upload (and an ASTC transcode).
+        static const u64 large_bytes = [] {
+            const char* value = std::getenv("EDEN_NX2_LARGE_IMAGE_MIB");
+            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;
+        }();
+        const u64 bytes = image.guest_size_bytes;
+        if (bytes >= large_bytes) {
+            LOG_INFO(HW_GPU,
+                     "Large image deleted ({}): {:#x} {}x{} format {} {} MiB guest; cache {} MiB "
+                     "(expected {}, critical {})",
+                     delete_reason, image.gpu_addr, image.info.size.width, image.info.size.height,
+                     static_cast<u32>(image.info.format), bytes >> 20, total_used_memory >> 20,
+                     expected_memory >> 20, critical_memory >> 20);
+        }
+        delete_reason = "other";
+    }
     ++images_deleted;
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while

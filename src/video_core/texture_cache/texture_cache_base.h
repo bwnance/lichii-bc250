@@ -686,6 +686,8 @@ private:
     /// The bound depth target is wider than tall by padding only (see FindDepthBuffer).
     bool depth_target_padded = false;
     u64 total_used_memory = 0;
+    /// Why the next DeleteImage happens (log of large images only).
+    const char* delete_reason = "other";
     u64 minimum_memory;
     u64 expected_memory;
     u64 critical_memory;
