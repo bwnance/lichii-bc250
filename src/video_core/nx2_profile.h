@@ -22,6 +22,7 @@
 #include "common/spin_recursive_mutex.h"
 #include "common/thread_cpu_clock.h"
 #include "video_core/nx2_stutter_trace.h"
+#include "video_core/nx2_timeline.h"
 
 // EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
@@ -131,14 +132,14 @@ inline constexpr auto stutter_categories = [] {
 // A plain flag: Enabled() runs several times per method write (no guard to check).
 inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
 /// Whether zones measure: for the profile or for EDEN_NX2_STUTTER_TRACE.
-inline bool g_zones_enabled = g_enabled || StutterTrace::ReadEnv();
+inline bool g_zones_enabled = g_enabled || StutterTrace::ReadEnv() || Nx2Timeline::Enabled();
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
     g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
     StutterTrace::ReadSwitch();
-    g_zones_enabled = g_enabled || StutterTrace::Enabled();
+    g_zones_enabled = g_enabled || StutterTrace::Enabled() || Nx2Timeline::Enabled();
     Common::g_count_spin_contention = g_enabled;
 }
 
@@ -205,6 +206,7 @@ public:
         }
         const u64 end = Ticks();
         const u64 elapsed = end - start;
+        Nx2Timeline::Record(static_cast<u32>(zone), start, end);
         auto& data = t_data;
         const auto index = static_cast<size_t>(zone);
         const u64 exclusive = elapsed - data.child_ns;

@@ -234,6 +234,12 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     if (VideoCommon::StutterTrace::Enabled()) {
         VideoCommon::StutterTrace::OnPresent();
     }
+    if (VideoCommon::Nx2Timeline::Enabled()) {
+        namespace Profile = VideoCommon::Nx2Profile;
+        VideoCommon::Nx2Timeline::OnPresent([] { return Profile::Now(); },
+                                            [] { return Profile::Ticks(); }, Profile::zone_names,
+                                            static_cast<u32>(Profile::Zone::Present));
+    }
     RenderScreenshot(framebuffers);
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
