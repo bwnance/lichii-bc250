@@ -122,6 +122,7 @@ public:
     }
 
     void LogMemoryStatistics() const;
+    void CheckMemoryPeak() const;
 
     /// EDEN_NX2_MEM_TRACE: staging buffers, then the process, DXGI and VMA (LogMemoryTrace).
     void LogMemoryTrace();

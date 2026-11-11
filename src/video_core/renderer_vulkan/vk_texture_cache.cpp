@@ -2889,6 +2889,10 @@ void TextureCacheRuntime::LogMemoryStatistics() const {
     Vulkan::LogMemoryStatistics(device);
 }
 
+void TextureCacheRuntime::CheckMemoryPeak() const {
+    Vulkan::CheckMemoryPeak(device);
+}
+
 void TextureCacheRuntime::LogMemoryTrace() {
     LOG_INFO(Render_Vulkan, "Memory trace: staging upload {} MiB, download {} MiB, device {} MiB",
              staging_buffer_pool.CachedBytes(MemoryUsage::Upload) >> 20,

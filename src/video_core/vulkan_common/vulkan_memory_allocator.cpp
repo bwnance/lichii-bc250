@@ -759,6 +759,39 @@ void LogMemoryTrace(const Device& device) {
     LOG_INFO(Render_Vulkan, "Memory trace: types {}", types);
 }
 
+void CheckMemoryPeak(const Device& device) {
+    static const char* const path = std::getenv("EDEN_NX2_VMA_PEAK_DUMP");
+    if (path == nullptr) {
+        return;
+    }
+    static u64 last_dump{};
+    const VmaAllocator allocator = device.GetAllocator();
+    const VkPhysicalDeviceMemoryProperties* properties{};
+    vmaGetMemoryProperties(allocator, &properties);
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(allocator, budgets.data());
+    u64 usage{};
+    u64 vma_bytes{};
+    for (u32 heap = 0; heap < properties->memoryHeapCount; ++heap) {
+        usage += budgets[heap].usage;
+        vma_bytes += budgets[heap].statistics.blockBytes;
+    }
+    if (usage < last_dump + (256ULL << 20)) {
+        return;
+    }
+    last_dump = usage;
+    char* json{};
+    vmaBuildStatsString(allocator, &json, VK_TRUE);
+    const std::string file_path = fmt::format("{}.peak.json", path);
+    if (std::FILE* file = std::fopen(file_path.c_str(), "w")) {
+        std::fputs(json, file);
+        std::fclose(file);
+    }
+    vmaFreeStatsString(allocator, json);
+    LOG_INFO(Render_Vulkan, "VMA peak map written to {}: heaps {} MiB in use, VMA blocks {} MiB",
+             file_path, usage >> 20, vma_bytes >> 20);
+}
+
 void LogMemoryStatistics(const Device& device) {
     const VmaAllocator allocator = device.GetAllocator();
     const VkPhysicalDeviceMemoryProperties* properties{};

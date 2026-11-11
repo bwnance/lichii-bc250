@@ -191,6 +191,9 @@ namespace Vulkan {
 
     /// Logs VMA's blocks and allocations per memory type, and each heap's budget.
     void LogMemoryStatistics(const Device& device);
+    /// EDEN_NX2_VMA_PEAK_DUMP=<path> (diagnostic): writes VMA's detailed map to <path>.peak.json
+    /// each time the heaps hold 256 MiB more than at the last dump. Cheap when unset.
+    void CheckMemoryPeak(const Device& device);
 
     /// One line each for the process's memory, what DXGI counts for the GPU (Windows), and VMA's
     /// heaps and memory types against what the driver reports (EDEN_NX2_MEM_TRACE).
