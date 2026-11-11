@@ -224,7 +224,7 @@ two runs each): **~25 fps** world rate, peak GPU memory ~6.4-6.5 GB, image notic
 - **PR #573 AMD performance fixes, ported and RADV-gated.** Upstream gates every fix on
    AMD's proprietary Windows driver; the BC-250 runs RADV (`VK_DRIVER_ID_MESA_RADV`), so
    they never fired there. This fork extends the gates (see below).
-- **BC-250 installer and Steam shortcut helper** (`tools/bc250/`): distrobox build, tuned
+- **BC-250 installer and Steam shortcut helper** (`tools/bc250/`): native CachyOS build, tuned
   wrapper and per-game config template, and a safe binary `shortcuts.vdf` writer.
 
 ## What this fork adds on top of upstream `nx2`
@@ -250,7 +250,15 @@ two runs each): **~25 fps** world rate, peak GPU memory ~6.4-6.5 GB, image notic
 
 ## Building
 
-Tested on Fedora 42 with clang; CLI only (no Qt):
+Tested on CachyOS with clang; CLI only (no Qt). Dependencies (pacman):
+
+```sh
+sudo pacman -S --needed base-devel git autoconf cmake ninja pkgconf clang nasm patch make jq \
+  fmt glslang spirv-tools hidapi nlohmann-json libtool libusb zstd lz4 openssl \
+  libpulse speexdsp wayland zlib ffmpeg libxext boost sdl3
+```
+
+Then:
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -280,17 +288,16 @@ some upstream source exports, and the build fails without it).
 
 ## Installation on the BC-250
 
-The console runs Bazzite (an immutable OS), so the binary is built inside a distrobox
-container and launched through a small wrapper that sets the tuning for this iGPU.
+The console runs CachyOS, so the binary is built directly on the host and launched through
+a small wrapper that sets the tuning for this iGPU.
 
 ```sh
-git clone https://github.com/lethevimlet/lichii-bc250.git
+git clone https://github.com/bwnance/lichii-bc250.git
 cd lichii-bc250
 ./tools/bc250/bc250-install.sh --with-shortcut --game "<path to your Ocarina of Time dump>"
 ```
 
-That creates the `lichii-bc250-build` Fedora 42 container, installs the build dependencies in
-it, builds `eden-cli`, installs the wrapper to `~/Applications/lichii-bc250/lichii-bc250` with the
+That installs the build dependencies with pacman (asking for sudo once), builds `eden-cli`, installs the wrapper to `~/Applications/lichii-bc250/lichii-bc250` with the
 tuning in the wrapper and a per-game config template (`oot.ini`), and — with
 `--with-shortcut` — registers the game as a Steam non-Steam shortcut so it launches from
 Gaming Mode with a controller. The shortcut step needs Steam stopped (the installer tells
