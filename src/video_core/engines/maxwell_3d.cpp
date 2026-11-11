@@ -388,6 +388,11 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     // DMA reads use it. OoT's memory-reading macros rewrite it before ~25k draws/s.
     case 0x154:
     case 0x155:
+    // The next report's address and payload: the report itself is checked when it is written
+    // (ReportMayReachDrawState). OoT points a new occlusion report at them per test.
+    case MAXWELL3D_REG_INDEX(report_semaphore.address_high):
+    case MAXWELL3D_REG_INDEX(report_semaphore.address_low):
+    case MAXWELL3D_REG_INDEX(report_semaphore.payload):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
     case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
@@ -1830,7 +1835,10 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
                 AsyncReadback::MaybeReport();
             }
         },
-        fs.parameters);
+        // Neutral for fast draws: the macro only reads memory itself, and every register write,
+        // method or draw it makes goes through CallMethod, which ends the delta chain whenever
+        // that write does.
+        fs.parameters, VideoCommon::GpuSplit::Writes::Anywhere, VideoCommon::GpuSplit::FastDrawNeutral);
     const u64 position = split.Position();
     fs.back_last = position;
     const bool tracked = fs.control == Regs::ShadowRamControl::Track ||
