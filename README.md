@@ -19,6 +19,17 @@ top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
 
 ## Changelog
 
+### 2026-11-11 (afternoon): controllers reconnect
+
+- **A pad that disconnects and comes back works again without restarting the game**, and a pad
+  switched on after launch is picked up too. Inside a rootless container (the distrobox the
+  installer uses) libudev drops the host's hotplug messages, so SDL never saw a controller
+  leave or return. When `/run/.containerenv` or `/.dockerenv` exists the emulator now sets
+  `SDL_JOYSTICK_DISABLE_UDEV=1`, so SDL watches `/dev/input` with inotify instead (set the
+  variable yourself to override). Controller add/remove is logged at Info level. Verified by
+  unbinding and rebinding the Xbox 360 receiver mid-game: Steam re-creates its virtual pad and
+  the emulator puts it back in the same player slot about a second later.
+
 ### 2026-11-11 (night): PGO build, smaller JIT tables, three Lichii PRs
 
 - **PGO build: about +10% world fps.** Built with clang 23 and `lichii-linux.profdata` (from
@@ -249,6 +260,9 @@ verified Xbox 360 wireless receiver mapping (the common BC-250 setup); a differe
 needs its own `player_0_*` lines in the `[Controls]` section, or configure the pad once
 with the GUI build and copy the `[Controls]` block over. Every mapping line must carry
 `<key>\default=false` — without it the loader ignores the value.
+
+Controllers can be switched on after launch and reconnect mid-game (see the 2026-11-11
+afternoon changelog entry).
 
 ### Achieving the measured performance
 
