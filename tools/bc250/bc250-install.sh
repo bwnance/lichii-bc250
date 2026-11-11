@@ -1,5 +1,5 @@
 #!/bin/bash
-# oot-bc250 installer for the AMD BC-250 console (Bazzite).
+# lichii-bc250 installer for the AMD BC-250 console (Bazzite).
 #
 # Usage:  ./tools/bc250/bc250-install.sh [--with-shortcut] [--game <path>]
 #         or:  curl -fsSL <repo>/tools/bc250/bc250-install.sh | bash -s -- --with-shortcut
@@ -18,9 +18,9 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 REPO_BUILD_DIR="__REPO_BUILD_DIR__"
-CONTAINER=oot-bc250-build
+CONTAINER=lichii-bc250-build
 IMAGE=fedora:42
-APP_DIR="$HOME/Applications/oot-bc250"
+APP_DIR="$HOME/Applications/lichii-bc250"
 INSTALL_USER="${SUDO_USER:-$USER}"
 
 WITH_SHORTCUT=0
@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-log() { printf "\033[1;36m[oot-bc250]\033[0m %s\n" "$*"; }
+log() { printf "\033[1;36m[lichii-bc250]\033[0m %s\n" "$*"; }
 
 if [ "$(id -u)" = 0 ]; then
     # Plain root ssh logins have no systemd user session: re-exec as the desktop user
@@ -87,12 +87,12 @@ log "built $REPO_DIR/build/bin/eden-cli"
 log "installing the launch wrapper to $APP_DIR"
 mkdir -p "$APP_DIR"
 
-cat > "$APP_DIR/oot-bc250" <<'WRAP'
+cat > "$APP_DIR/lichii-bc250" <<'WRAP'
 #!/usr/bin/env bash
-# oot-bc250 launcher: tunes the emulator for the BC-250 iGPU, then runs eden-cli.
-# Usage: oot-bc250 [-f] -g "<path to your Ocarina of Time dump>"
+# lichii-bc250 launcher: tunes the emulator for the BC-250 iGPU, then runs eden-cli.
+# Usage: lichii-bc250 [-f] -g "<path to your game dump>"
 set -euo pipefail
-CONTAINER=oot-bc250-build
+CONTAINER=lichii-bc250-build
 unset LD_PRELOAD
 # The BC-250 iGPU (RADV) with UMA: cap the texture cache so it never tramples
 # the 15 GB of system RAM the game and the compositor also live in.
@@ -107,8 +107,8 @@ export EDEN_NX2_FRAMES_AHEAD=2   # the game runs a frame ahead of the GPU thread
 export EDEN_NX2_PRELOAD_ALL_PIPELINES=0  # cached pipelines build on first sight (boots faster)
 exec distrobox enter "$CONTAINER" -- "$REPO_BUILD_DIR/bin/eden-cli" "$@"
 WRAP
-sed -i "s|__REPO_BUILD_DIR__|$REPO_DIR/build|" "$APP_DIR/oot-bc250"
-chmod +x "$APP_DIR/oot-bc250"
+sed -i "s|__REPO_BUILD_DIR__|$REPO_DIR/build|" "$APP_DIR/lichii-bc250"
+chmod +x "$APP_DIR/lichii-bc250"
 
 if [ ! -f "$APP_DIR/oot.ini" ]; then
     log "writing the per-game config template ($APP_DIR/oot.ini)"
@@ -978,7 +978,7 @@ cat <<'DONE'
 
 \033[1mInstalled.\033[0m Launch the game with:
 
-  $APP_DIR/oot-bc250 -f -g "<path to your Ocarina of Time dump>"
+  $APP_DIR/lichii-bc250 -f -g "<path to your Ocarina of Time dump>"
 
 Run the wrapper with  -c "$APP_DIR/oot.ini"  for the tuned per-game settings
 (every \default flag matters: without them the loader ignores your values).
@@ -1011,7 +1011,7 @@ MSG
     log "adding the Steam shortcut to $(basename "$(dirname "$(dirname "$VDF")")")"
     python3 "$REPO_DIR/tools/bc250/add_steam_shortcut.py" \
         --vdf "$VDF" --name "Zelda Ocarina of Time" \
-        --exe "$APP_DIR/oot-bc250" \
+        --exe "$APP_DIR/lichii-bc250" \
         --launch-options "-f -c \"$APP_DIR/oot.ini\" -g \"$(realpath "$GAME_PATH")\""
     log "shortcut added; start Steam and it will be in your library under Non-Steam"
 fi

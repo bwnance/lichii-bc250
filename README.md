@@ -1,4 +1,8 @@
-# oot-bc250
+<p align="center">
+  <img src="logo.png" alt="lichii-bc250 logo" width="520">
+</p>
+
+# lichii-bc250
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -6,9 +10,15 @@
 > console; use it only with backups of content you legally own. Do not open issues about
 > obtaining games, keys or firmware — they will be closed.
 
-A [Lichii](https://github.com/zortos293/Lichii) fork tuned for **The Legend of Zelda:
-Ocarina of Time (Switch 2)** on the **AMD BC-250 console** (GFX1013-class iGPU, RADV,
-1080p TV output, shared-memory 16 GB with a small UMA carve-out).
+A [Lichii](https://github.com/zortos293/Lichii) fork optimized for the **AMD BC-250
+console** (GFX1013-class iGPU, RADV, 1080p TV output, 16 GB of memory shared by the CPU and
+the GPU with a small UMA carve-out). It is not limited to one game: the work here targets
+the BC-250 itself (memory pressure, swap, device-memory peaks, the texture cache, the
+container the emulator runs in), so it helps whatever runs on it. **The Legend of Zelda:
+Ocarina of Time (Switch 2)** is the title it has been tuned and measured on so far, so the
+numbers and the installer's defaults below are for it; other games are planned.
+
+This repository was called `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
 All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; this repo only
 carries the BC-250-specific deltas on top. GPLv3, like upstream.
@@ -18,6 +28,44 @@ top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
 `~/.cache/eden`): see the build 150 notes below.
 
 ## Changelog
+
+### 2026-11-11 (evening): stutter fixes, renamed to lichii-bc250
+
+Measured on a new, harder route: after the 30 s Kokiri Forest walk, a 12 s camera spin, 15 s
+walking back through the open forest and another 12 s spin (3 runs per build).
+
+| | before | now |
+|---|---|---|
+| frames over 100 ms (route) | 10 / 8 / 9 | 2 / 2 / 1 |
+| frames over 50 ms (route) | 95 / 70 / 90 | 21 / 27 / 8 |
+| fps (route) | ~26.5 | 28.4-29.9 |
+| fps (30 s walk) | 26.9-27.5 | 28.1-30.3 |
+| device-memory peak | ~6.1 GB | 4.5-5.0 GB |
+
+- **Texture cache keeps images used in the last 300 frames** (`EDEN_NX2_TC_MIN_AGE`, ~10 s at
+  30 fps; not when device memory runs out). On the BC-250 the cache sits above its critical
+  threshold all session, and the collector deleted everything unused for 10 frames: Ocarina's
+  6144x6144 ASTC texture was deleted and rebuilt every ~2.6 s as the camera turned (a new
+  image, a 192 MiB decode and a 50-190 ms frame each time). This was most of the remaining
+  stutter.
+- **ASTC decode images are recycled as soon as the GPU is done with them** and capped in
+  flight (`EDEN_NX2_ASTC_PENDING_MIB`, default 256). At the save load's memory peak, 449
+  decode images held 2.3 GB at once; the peak drops by ~1.7 GB.
+- **Fix: GPU write fault (device lost) in ASTC transcodes.** The transcode submits after every
+  decode, so its staging buffers were still used after the tick they were stamped with, and
+  the pool could free one while the GPU wrote it.
+- **Lichii ports:** #1313 (built-in fix for Ocarina's guard-house freeze), #1314 (guard house
+  from single digits to 50+ fps, superseded images deleted), #852, #1320, #1327, #1331, and
+  #1225's JIT warm-up list as an opt-in (`EDEN_NX2_JIT_WARMUP_LIST=1`; every core compiles the
+  whole list, which costs RAM). Not taken: #1334/#1337 (keep pipelines in memory: +~90 MiB for
+  rare hitches), #1335 (device-memory overallocation).
+- **Diagnostics:** `EDEN_NX2_VMA_PEAK_DUMP=<path>` writes VMA's allocation map at each new
+  device-memory high; `EDEN_NX2_LARGE_IMAGE_MIB=<n>` now also logs why large images are deleted.
+- **Controllers reconnect** (see below) and the repo, installer container
+  (`lichii-bc250-build`) and wrapper (`~/Applications/lichii-bc250/lichii-bc250`) are renamed.
+  An older install keeps working; its container can be removed with
+  `distrobox rm lichii-bc250-build`.
+
 
 ### 2026-11-11 (afternoon): controllers reconnect
 
@@ -216,13 +264,13 @@ The console runs Bazzite (an immutable OS), so the binary is built inside a dist
 container and launched through a small wrapper that sets the tuning for this iGPU.
 
 ```sh
-git clone https://github.com/lethevimlet/oot-bc250.git
-cd oot-bc250
+git clone https://github.com/lethevimlet/lichii-bc250.git
+cd lichii-bc250
 ./tools/bc250/bc250-install.sh --with-shortcut --game "<path to your Ocarina of Time dump>"
 ```
 
-That creates the `oot-bc250-build` Fedora 42 container, installs the build dependencies in
-it, builds `eden-cli`, installs the wrapper to `~/Applications/oot-bc250/oot-bc250` with the
+That creates the `lichii-bc250-build` Fedora 42 container, installs the build dependencies in
+it, builds `eden-cli`, installs the wrapper to `~/Applications/lichii-bc250/lichii-bc250` with the
 tuning in the wrapper and a per-game config template (`oot.ini`), and — with
 `--with-shortcut` — registers the game as a Steam non-Steam shortcut so it launches from
 Gaming Mode with a controller. The shortcut step needs Steam stopped (the installer tells
@@ -231,7 +279,7 @@ you when); the installer never starts or stops Steam for you.
 The manual launch, if you prefer no shortcut:
 
 ```sh
-~/Applications/oot-bc250/oot-bc250 -f -c ~/Applications/oot-bc250/oot.ini \
+~/Applications/lichii-bc250/lichii-bc250 -f -c ~/Applications/lichii-bc250/oot.ini \
   -g "<path to your Ocarina of Time dump>"
 ```
 
