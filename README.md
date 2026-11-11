@@ -19,6 +19,39 @@ top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
 
 ## Changelog
 
+### 2026-11-11 (night): PGO build, smaller JIT tables, three Lichii PRs
+
+- **PGO build: about +10% world fps.** Built with clang 23 and `lichii-linux.profdata` (from
+  zortos293/Lichii PR #1205: Lichii's profile merged with a Linux Ocarina of Time run on a
+  Zen 2 CPU and RADV). Straight Kokiri Forest walk, same source: 26.6 / 26.4 / 28.1 fps with
+  the profile against 24.3 / 24.3 without, and fewer slow frames (73-98 over 50 ms per walk
+  against 105-120). See "Building with PGO" below.
+- **Fastmem patch entries 24 -> 20 bytes** in dynarmic: the block location, the same for every
+  access of a block, is stored once per block.
+- **Lichii PRs not merged upstream yet:** #1271 (hand freed heap memory back to Linux after
+  pipeline evictions), #1241 (Ocarina's recreated post-processing targets skip a pointless
+  upload), #1265 (no perf-map lock per compiled block). No measurable change on the walk.
+
+#### Building with PGO
+
+The profile is indexed format 14: it needs clang 22 or newer (Fedora 42's clang 20 cannot read
+it). LLVM's prebuilt `LLVM-23.1.5-Linux-X64.tar.xz` from the LLVM GitHub releases works inside
+the build container. Same configure as usual, plus:
+
+```sh
+L=/path/to/LLVM-23.1.5-Linux-X64/bin
+P="-fprofile-use=$PWD/lichii-linux.profdata -Wno-backend-plugin -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+cmake -S . -B build-pgo -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=$L/clang -DCMAKE_CXX_COMPILER=$L/clang++ \
+  -DCMAKE_AR=$L/llvm-ar -DCMAKE_RANLIB=$L/llvm-ranlib \
+  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld "-DCMAKE_C_FLAGS=$P" "-DCMAKE_CXX_FLAGS=$P" \
+  -DENABLE_QT=OFF -DYUZU_CMD=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_LTO=OFF
+cmake --build build-pgo --target eden-cli -j6
+```
+
+Functions changed since the profile was recorded just lose their profile data (the warnings
+are switched off); the rest is optimized for Ocarina's hot paths.
+
 ### 2026-11-11 (later): Fritchii v5.6-v5.8.3 ports
 
 Owner's verdict after playing it: "works really well most of the time above 30 fps with just
