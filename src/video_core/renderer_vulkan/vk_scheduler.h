@@ -223,7 +223,8 @@ public:
     /// Whether a command was recorded since the last Flush or Finish (EXP61: a flush with nothing
     /// to submit is skipped).
     [[nodiscard]] bool RecordedSinceSubmit() const noexcept {
-        return record_serial != submitted_serial;
+        // Batched uploads (#1245) wait without a recorded command: they need the submit too.
+        return uploads_pending || record_serial != submitted_serial;
     }
 
     /// Whether the recording thread submitted `tick` within 20 ms.
