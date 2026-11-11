@@ -53,7 +53,7 @@ two runs each): **~25 fps** world rate, peak GPU memory ~6.4-6.5 GB, image notic
 - **Data folder:** build 150 moves its data to `~/.local/share/lichii` and makes eden-cli
   stop until the Qt GUI imports the old folder. This fork builds eden-cli only, so it keeps
   the `eden` folders: saves, keys, config and shader caches stay where they are.
-- **Diagnostics:** images of 256 MiB or more are named in the log; upstream's
+- **Diagnostics:** images of 256 MiB or more (`EDEN_NX2_LARGE_IMAGE_MIB=<n>` to change) are named in the log; upstream's
   `EDEN_NX2_STUTTER_TRACE=1` attributes every slow frame (it showed the remaining drops are
   memory pressure: allocations and page-ins while the 16 GB board swaps, not shader builds).
 

@@ -263,8 +263,13 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     const bool huge = texels > MaxBackedImageTexels;
     VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
-    if (result == VK_SUCCESS && alloc_info.size >= (u64{256} << 20)) {
-        // Images of 256 MiB and more are rare and dominate device memory: name them.
+    // Images of EDEN_NX2_LARGE_IMAGE_MIB (default 256) MiB and more are rare and dominate device
+    // memory: name them.
+    static const u64 large_image_bytes = [] {
+        const char* value = std::getenv("EDEN_NX2_LARGE_IMAGE_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;
+    }();
+    if (result == VK_SUCCESS && alloc_info.size >= large_image_bytes) {
         LOG_INFO(Render_Vulkan,
                  "Large image {} MiB: {}x{}x{} ({} levels, {} layers, {} samples, format {}, "
                  "usage {:#x}, flags {:#x}, type {})",
