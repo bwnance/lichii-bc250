@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <numbers>
 #include "common/logging.h"
 #include "common/math_util.h"
@@ -681,11 +682,11 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
         break;
     }
     case SDL_EVENT_JOYSTICK_REMOVED:
-        LOG_DEBUG(Input, "Controller removed with Instance_ID {}", event.jdevice.which);
+        LOG_INFO(Input, "Controller removed with Instance_ID {}", event.jdevice.which);
         CloseJoystick(SDL_GetJoystickFromID(event.jdevice.which));
         break;
     case SDL_EVENT_JOYSTICK_ADDED:
-        LOG_DEBUG(Input, "Controller connected with device index {}", event.jdevice.which);
+        LOG_INFO(Input, "Controller connected with device index {}", event.jdevice.which);
         InitJoystick(event.jdevice.which);
         break;
     }
@@ -700,6 +701,19 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
     // Set our application name. Currently passed to DBus by SDL and visible to the user through
     // their desktop environment.
     SDL_SetHint(SDL_HINT_APP_NAME, "Eden");
+
+#ifdef __linux__
+    // Inside a rootless container (distrobox/toolbox/podman) libudev drops every hotplug message,
+    // because the host's udevd shows up as uid "nobody" in the user namespace. SDL then never sees
+    // a controller that disconnects and comes back (wireless timeout, Steam Input re-creating its
+    // virtual pad). Make SDL watch /dev/input with inotify instead, unless the user chose otherwise.
+    if (!SDL_getenv("SDL_JOYSTICK_DISABLE_UDEV") &&
+        (std::filesystem::exists("/run/.containerenv") || std::filesystem::exists("/.dockerenv"))) {
+        LOG_INFO(Input, "Running in a container: using inotify for controller hotplug");
+        SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "SDL_JOYSTICK_DISABLE_UDEV", "1", false);
+        SDL_SetHint("SDL_JOYSTICK_DISABLE_UDEV", "1");
+    }
+#endif
 
     // Disable raw input. When enabled this setting causes SDL to die when a web applet opens
     SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, Settings::values.enable_raw_input ? "1" : "0");
