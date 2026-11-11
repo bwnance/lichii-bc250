@@ -141,6 +141,24 @@ void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
     it->deferred = false;
 }
 
+void StagingBufferPool::Touch(const StagingBufferRef& ref) {
+    const u64 tick = scheduler.CurrentTick();
+    if (stream_buffer && ref.buffer == *stream_buffer) {
+        const size_t size = (std::max)(ref.mapped_span.size(), size_t{1});
+        const size_t end = (std::min)(Region(ref.offset + size - 1) + 1, NUM_SYNCS);
+        for (size_t region = Region(ref.offset); region < end; ++region) {
+            sync_ticks[region] = (std::max)(sync_ticks[region], tick);
+        }
+        return;
+    }
+    auto& entries = GetCache(ref.usage)[ref.log2_level].entries;
+    const auto it = std::find_if(entries.begin(), entries.end(),
+                                 [&ref](const StagingBuffer& entry) { return entry.index == ref.index; });
+    if (it != entries.end() && !it->deferred) {
+        it->tick = (std::max)(it->tick, tick);
+    }
+}
+
 void StagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
 

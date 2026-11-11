@@ -39,6 +39,10 @@ public:
 
     StagingBufferRef Request(size_t size, MemoryUsage usage, bool deferred = false);
     void FreeDeferred(StagingBufferRef& ref);
+    /// Marks ref in use until the current tick. A Request stamps the tick it was made at; work
+    /// recorded after a submit (Flush) that still uses the buffer must call this, or the pool
+    /// reuses or frees it while the GPU still reads or writes it.
+    void Touch(const StagingBufferRef& ref);
 
     [[nodiscard]] VkBuffer StreamBuf() const noexcept {
         return *stream_buffer;

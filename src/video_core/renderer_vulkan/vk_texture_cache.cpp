@@ -5325,6 +5325,11 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                                0, barrier);
     });
     image.UploadMemory(output.buffer, output.offset, copies);
+    // Each decode above was submitted, so the encodes and this copy run in later command buffers
+    // than the ticks the source and output buffers were requested at: keep both until now, or
+    // the pool frees or reuses them while the GPU still writes them (GPUVM write faults).
+    staging_buffer_pool.Touch(output);
+    staging_buffer_pool.Touch(map);
     pending.tick = scheduler.CurrentTick();
     pending_transcodes.push_back(std::move(pending));
 }
