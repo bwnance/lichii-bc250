@@ -59,10 +59,6 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
 DmaPusher::~DmaPusher() = default;
 
 bool DmaPusher::CanResumeAcquire() {
-    if (pending_writer_position) {
-        VideoCommon::Count(VideoCommon::g_acquire_stats.list_polls);
-        return VideoCommon::GpuSplit::Get().ReachedPublishing(*pending_writer_position);
-    }
     if (pending_list_tick) {
         VideoCommon::Count(VideoCommon::g_acquire_stats.list_polls);
         return rasterizer->IsGpuTickDone(*pending_list_tick);
@@ -145,23 +141,11 @@ bool DmaPusher::Step() {
         return false;
     }
     // Waiting for the GPU's copy of a command list this channel reads next (ReadGpuWrittenCommands).
-    // Waiting for the back to run the compute work that writes that list (ReadGpuWrittenCommands).
-    bool writers_passed = false;
-    if (pending_writer_position) {
-        if (!VideoCommon::GpuSplit::Get().ReachedPublishing(*pending_writer_position)) {
-            return false;
-        }
-        pending_writer_position.reset();
-        writers_passed = true;
-    }
     if (pending_list_tick) {
         if (!rasterizer->IsGpuTickDone(*pending_list_tick)) {
             return false;
         }
         pending_list_tick.reset();
-        resumed_list_read = true;
-    }
-    if (writers_passed) {
         resumed_list_read = true;
     }
     // Only for the entry that suspended: an acquire still waiting, the safe-read path or a stopped
@@ -797,19 +781,6 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pendin
     // meanwhile too.
     const bool resumed = std::exchange(resumed_list_read, false);
     if (split.Active() && !resumed) {
-        // EDEN_NX2_LIST_PARK=0: the front waits for the writers as before. Otherwise a channel
-        // whose list's writers the back has not run yet parks (as for the GPU copy below) and the
-        // front parses the other channels meanwhile.
-        static const bool park = [] {
-            const char* value = std::getenv("EDEN_NX2_LIST_PARK");
-            return value == nullptr || value[0] != '0';
-        }();
-        const u64 target = split.WritersTarget();
-        if (park && pending != nullptr && !split.ReachedPublishing(target)) {
-            pending_writer_position = target;
-            *pending = true;
-            return false;
-        }
         split.WaitForWriters();
     }
     bool past_sync = !split.Active();
