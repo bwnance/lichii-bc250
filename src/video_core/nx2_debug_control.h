@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -93,5 +96,26 @@ u64 SetRejected(std::span<const u64> hashes, bool rejected);
 void NoteRejectApplied(u64 generation);
 /// Server thread: waits until the rasterizer applied the generation.
 [[nodiscard]] bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout);
+
+/// Experiment switches ported from Fritchii (EDEN_NX2_EXP<n>, read once). Defaults follow the
+/// BC-250 fork: EXP56 (no upload of a cleared depth target), EXP58 (superseded render targets
+/// die) and EXP61 (no empty submits) on; everything else off unless set.
+inline constexpr int ExperimentCount = 64;
+[[nodiscard]] inline int Experiment(int n) {
+    static const std::array<int, ExperimentCount> values = [] {
+        std::array<int, ExperimentCount> v{};
+        v[56] = 1;
+        v[58] = 1;
+        v[61] = 1;
+        for (int i = 0; i < ExperimentCount; ++i) {
+            const std::string name = "EDEN_NX2_EXP" + std::to_string(i);
+            if (const char* value = std::getenv(name.c_str())) {
+                v[i] = std::atoi(value);
+            }
+        }
+        return v;
+    }();
+    return n >= 0 && n < ExperimentCount ? values[n] : 0;
+}
 
 } // namespace VideoCore::Nx2Debug
