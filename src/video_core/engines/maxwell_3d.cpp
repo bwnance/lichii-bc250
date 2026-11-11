@@ -428,7 +428,13 @@ bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
-    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method)) {
+    // Query counter resets and render-enable (conditional rendering) changes leave everything a
+    // delta draw keeps (pipeline, image views, samplers, texture buffers) as it was: whether a draw
+    // runs is still decided per draw, and anything they do to the command buffer or render pass
+    // ends the delta chain through those checks. OoT wraps ~25k draws/s in them (occlusion tests).
+    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method) &&
+        method != MAXWELL3D_REG_INDEX(clear_report_value) &&
+        method != MAXWELL3D_REG_INDEX(render_enable.mode)) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
