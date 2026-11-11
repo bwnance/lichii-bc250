@@ -65,8 +65,6 @@ struct AcquireStats {
     std::atomic<u64> drain_settings{};  ///< ...the split or the accuracy settings ask for it
     std::atomic<u64> drain_word{};      ///< ...the word is unmapped or on a GPU-written page
     std::atomic<u64> drain_queued{};    ///< ...a queued release to it is unknown or doesn't meet it
-    std::atomic<u64> drain_untracked{}; ///< ...equal or mask: queued work may write the word
-    std::atomic<u64> passed_equal{};    ///< Of passed: equal or mask acquires
     std::atomic<u64> valve_drains{}; ///< Of drained: polls of an unmet acquire, once per 1 ms
     std::atomic<u64> polls{};     ///< Polls that keep waiting without a drain
     std::atomic<u64> acquire_polls{}; ///< Polls of suspended channels waiting on an acquire
@@ -314,12 +312,6 @@ public:
     };
     /// The last write sent to the semaphore word at `device_address`, if the back may not have run
     /// it yet.
-    /// Whether work the back has yet to run may write [address, address + size): a noted write
-    /// there, or any write the front could not place (Writes::Anywhere), since the back's position.
-    [[nodiscard]] bool QueuedMayWrite(const Tegra::MemoryManager& memory, GPUVAddr address,
-                                      u64 size) const {
-        return WritesTarget(memory, address, size) > consumed.load(std::memory_order_acquire);
-    }
     [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
         u64 device_address) const;
     /// Waits until the back executed the compute and copy work sent before the last NoteSync:

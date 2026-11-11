@@ -117,15 +117,7 @@ enum class AcquireCheck {
 AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire) {
     auto& split = VideoCommon::GpuSplit::Get();
     auto& stats = VideoCommon::g_acquire_stats;
-    // Equal and mask acquires don't have the greater-or-equal one's monotonic argument, so they
-    // read memory only when nothing queued can write the word (below). EDEN_NX2_ACQUIRE_EQUAL=0
-    // drains for them as before.
-    static const bool equal_without_drain = [] {
-        const char* value = std::getenv("EDEN_NX2_ACQUIRE_EQUAL");
-        return value == nullptr || value[0] != '0';
-    }();
-    const bool reaches = acquire.WaitsToReach();
-    if (!reaches && !equal_without_drain) {
+    if (!acquire.WaitsToReach()) {
         VideoCommon::Count(stats.drain_operation);
         return AcquireCheck::Drain;
     }
@@ -140,24 +132,15 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
         return AcquireCheck::Drain;
     }
     if (const auto queued = split.QueuedSemaphoreWriteAt(*device)) {
-        // The last release sent to the word decides once the back ran it. For an equal or mask
-        // acquire nothing else queued may write the word after that release either.
-        if (queued->known && acquire.Matches(queued->payload) &&
-            (reaches || !split.QueuedMayWrite(dma_pusher.memory_manager, acquire.address, 4))) {
+        if (queued->known && acquire.Matches(queued->payload)) {
             return AcquireCheck::MetByQueued;
         }
         VideoCommon::Count(stats.drain_queued);
         return AcquireCheck::Drain;
     }
-    if (!reaches && split.QueuedMayWrite(dma_pusher.memory_manager, acquire.address, 4)) {
-        VideoCommon::Count(stats.drain_untracked);
-        return AcquireCheck::Drain;
-    }
-    const bool met = acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address));
-    if (met && !reaches) {
-        VideoCommon::Count(stats.passed_equal);
-    }
-    return met ? AcquireCheck::Met : AcquireCheck::NotMet;
+    return acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))
+               ? AcquireCheck::Met
+               : AcquireCheck::NotMet;
 }
 
 // EDEN_NX2_ACQUIRE_VERIFY=1: drains anyway and counts where the word after the drain disagrees
