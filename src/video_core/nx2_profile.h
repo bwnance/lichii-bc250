@@ -75,6 +75,7 @@ enum class Zone : u32 {
     WorkerIdle,           ///< VulkanWorker waiting for work
     PresentWait,          ///< Present waits for the Vulkan worker or a free presentation frame
     QueueSubmit,          ///< vkQueueSubmit
+    PresentFence,         ///< A free presentation frame waits for its last present's fence
     Count,
 };
 
@@ -89,7 +90,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait", "graphics pipeline miss",
     "compute pipeline miss", "pipeline wait", "shader capture", "texture cache", "GPU wait",
     "present", "worker idle",
-    "present wait", "queue submit",
+    "present wait", "queue submit", "present fence",
 };
 
 static_assert(static_cast<size_t>(Zone::Count) <= StutterTrace::ZoneSlots);
@@ -126,6 +127,7 @@ inline constexpr auto stutter_categories = [] {
     set(Zone::GpuWait, Category::QueryFence);
     set(Zone::Present, Category::Present);
     set(Zone::PresentWait, Category::Present);
+    set(Zone::PresentFence, Category::Present);
     return categories;
 }();
 

@@ -182,7 +182,10 @@ Frame* PresentManager::GetRenderFrame() {
     free_queue.pop_front();
 
     // Wait for the presentation to be finished so all frame resources are free
-    frame->present_done.Wait();
+    {
+        VideoCommon::Nx2Profile::Scope fence_scope{VideoCommon::Nx2Profile::Zone::PresentFence};
+        frame->present_done.Wait();
+    }
     frame->present_done.Reset();
 
     return frame;
@@ -445,8 +448,12 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         return;
     }
 
-    while (swapchain.AcquireNextImage(!use_present_thread)) {
-        RecreateSwapchain(frame);
+    {
+        // On the present thread: the swapchain image acquire (and the pacing wait in it).
+        VideoCommon::Nx2Profile::Scope acquire_scope{VideoCommon::Nx2Profile::Zone::PresentWait};
+        while (swapchain.AcquireNextImage(!use_present_thread)) {
+            RecreateSwapchain(frame);
+        }
     }
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
@@ -593,6 +600,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     }
 
     // Present
+    VideoCommon::Nx2Profile::Scope present_scope{VideoCommon::Nx2Profile::Zone::Present};
     swapchain.Present(render_semaphore);
 }
 
