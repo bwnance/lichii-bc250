@@ -36,16 +36,22 @@ void AxxEmitX64::AddFastmemPatch(CodePtr location, CodePtr resume_location, void
         ASSERT(address >= base && address - base <= UINT32_MAX);
         return u32(address - base);
     };
+    const u32 rip = offset(std::bit_cast<u64>(location));
+    const u32 resume_delta = offset(std::bit_cast<u64>(resume_location)) - rip;
+    const unsigned inst_name = std::get<1>(marker);
+    ASSERT(resume_delta < (1u << 11) && inst_name < (1u << 20));
+    // Patches arrive block by block: a block's location is stored once.
+    if (fastmem_blocks.empty() || fastmem_blocks.back() != std::get<0>(marker)) {
+        fastmem_blocks.push_back(std::get<0>(marker));
+    }
     FastmemPatchInfo info{
-        .rip = offset(std::bit_cast<u64>(location)),
-        .resume_rip = offset(std::bit_cast<u64>(resume_location)),
+        .rip = rip,
         .callback = offset(std::bit_cast<u64>(callback)),
-        .inst_name = 0,
-        .recompile = 0,
-        .location = std::get<0>(marker),
+        .block = u32(fastmem_blocks.size() - 1),
+        .inst_name = inst_name,
+        .resume_delta = resume_delta,
+        .recompile = recompile ? 1u : 0u,
     };
-    info.inst_name = std::get<1>(marker);
-    info.recompile = recompile ? 1 : 0;
     // Code is emitted in address order; only a block's deferred fallbacks can come after a later
     // access of the same block.
     auto it = fastmem_patch_info.end();
@@ -68,10 +74,11 @@ FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
     if (iter != fastmem_patch_info.end() && iter->rip == u32(rip_ - base)) {
         FakeCall result{
             .call_rip = base + iter->callback,
-            .ret_rip = base + iter->resume_rip,
+            .ret_rip = base + iter->rip + iter->resume_delta,
         };
         if (iter->recompile) {
-            const DoNotFastmemMarker marker{iter->location, static_cast<unsigned>(iter->inst_name)};
+            const DoNotFastmemMarker marker{fastmem_blocks[iter->block],
+                                            static_cast<unsigned>(iter->inst_name)};
             do_not_fastmem.insert(marker);
             InvalidateBasicBlocks({std::get<0>(marker)});
         }

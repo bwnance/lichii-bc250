@@ -88,14 +88,19 @@ public:
     // Fastmem information
     using DoNotFastmemMarker = std::tuple<IR::LocationDescriptor, unsigned>;
     /// Where a fastmem access that faults goes: code addresses are offsets in the code space.
+    /// Where a fastmem access that faults goes: code addresses are offsets in the code space.
+    /// 16 bytes: the block's location is kept once per block in fastmem_blocks, and the resume
+    /// address as a short distance from the access (24 bytes before: ~2M entries per emulated
+    /// core in Ocarina of Time, one table per core).
     struct FastmemPatchInfo {
         u32 rip;
-        u32 resume_rip;
         u32 callback;
-        u32 inst_name : 31;
+        u32 block; ///< index in fastmem_blocks
+        u32 inst_name : 20;
+        u32 resume_delta : 11; ///< resume rip - rip
         u32 recompile : 1;
-        IR::LocationDescriptor location;
     };
+    static_assert(sizeof(FastmemPatchInfo) == 16);
     std::optional<DoNotFastmemMarker> ShouldFastmem(A32EmitContext& ctx, IR::Inst* inst) const;
     void AddFastmemPatch(CodePtr location, CodePtr resume_location, void (*callback)(), const DoNotFastmemMarker& marker, bool recompile);
     FakeCall FastmemCallback(u64 rip);
@@ -132,6 +137,7 @@ public:
     BlockRangeInformation<u32> block_ranges;
     std::array<FastDispatchEntry, fast_dispatch_table_size> fast_dispatch_table;
     std::vector<FastmemPatchInfo> fastmem_patch_info;  // sorted by rip
+    std::vector<IR::LocationDescriptor> fastmem_blocks; ///< FastmemPatchInfo::block
     ::Common::unordered_map<std::tuple<bool, size_t, int, int>, void (*)()> read_fallbacks;
     ::Common::unordered_map<std::tuple<bool, size_t, int, int>, void (*)()> write_fallbacks;
     ::Common::unordered_map<std::tuple<bool, size_t, int, int>, void (*)()> exclusive_write_fallbacks;
