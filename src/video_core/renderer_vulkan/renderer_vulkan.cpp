@@ -264,6 +264,27 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
     }
+    {
+        // Output-rate report: game frames vs generated frames over ~10 s windows.
+        static auto window_start = std::chrono::steady_clock::now();
+        static u64 game_frames = 0;
+        static u64 extra_frames = 0;
+        ++game_frames;
+        extra_frames += generated_frames;
+        const auto now = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(now - window_start).count();
+        if (seconds >= 10.0) {
+            if (Settings::values.frame_gen.GetValue()) {
+                LOG_INFO(Render_Vulkan,
+                         "Frame gen output: {:.1f} game fps + {:.1f} generated fps = {:.1f} fps",
+                         game_frames / seconds, extra_frames / seconds,
+                         (game_frames + extra_frames) / seconds);
+            }
+            window_start = now;
+            game_frames = 0;
+            extra_frames = 0;
+        }
+    }
 #endif
 
     if (trace) {
