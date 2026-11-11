@@ -1531,6 +1531,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
 
     switch (post_op) {
     case ObtainBufferOperation::MarkAsWritten:
+        Tegra::Nx2CmdPageDiag::g_write_site = 0;
         MarkWrittenBuffer(buffer_id, device_addr, size);
         buffer.MarkUsage(buffer.Offset(device_addr), size);
         break;
@@ -2702,6 +2703,7 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
                 // write_mark_limit: the native write mark (BindComputeStorageBuffer), spread over
                 // the segments in order.
                 const u32 mark = static_cast<u32>(std::min<u64>(segment.size, write_mark_limit));
+                Tegra::Nx2CmdPageDiag::g_write_site = 1;
                 MarkWrittenBuffer(segment.buffer_id, segment.device_addr, mark);
                 if (write_mark_limit != ~u64{0}) {
                     write_mark_limit -= mark;
@@ -2733,6 +2735,7 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
+            Tegra::Nx2CmdPageDiag::g_write_site = 2;
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
         }
 
@@ -2755,6 +2758,7 @@ void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
 
         const bool is_written = ((channel_state->written_texture_buffers[stage] >> index) & 1) != 0;
         if (is_written) {
+            Tegra::Nx2CmdPageDiag::g_write_site = 3;
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
         }
 
@@ -2793,6 +2797,7 @@ void BufferCache<P>::BindHostTransformFeedbackBuffers() {
             TouchBuffer(buffer, binding.buffer_id);
             size = binding.size;
             SynchronizeBuffer(buffer, binding.device_addr, size);
+            Tegra::Nx2CmdPageDiag::g_write_site = 4;
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
             offset = buffer.Offset(binding.device_addr);
             buffer.MarkUsage(offset, size);
@@ -2890,6 +2895,7 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         const u32 mark =
             is_written ? static_cast<u32>(std::min<u64>(size, write_mark_limit)) : 0;
         if (mark != 0) {
+            Tegra::Nx2CmdPageDiag::g_write_site = 5;
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, mark, true);
         }
 
@@ -2913,6 +2919,7 @@ void BufferCache<P>::BindHostComputeTextureBuffers() {
         const bool is_written =
             ((channel_state->written_compute_texture_buffers >> index) & 1) != 0;
         if (is_written) {
+            Tegra::Nx2CmdPageDiag::g_write_site = 6;
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
         }
 
@@ -3256,6 +3263,7 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
                 if (Tegra::Nx2CmdPageDiag::g_enabled) {
                     Tegra::Nx2CmdPageDiag::NoteWrite(page_addr, device_addr, size,
                                                      !nx2_collect_list_copies);
+                    Tegra::Nx2CmdPageDiag::NoteWriteSite();
                 }
             }
             ++page;

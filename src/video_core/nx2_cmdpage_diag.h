@@ -29,6 +29,15 @@
 namespace Tegra::Nx2CmdPageDiag {
 
 inline bool g_enabled = std::getenv("EDEN_NX2_CMDPAGE_DIAG") != nullptr;
+/// Which buffer cache path marked the last GPU write (set just before MarkWrittenBuffer): 0 CPU
+/// buffer copy (DMA), 1 multi-range storage, 2 graphics storage, 3 graphics texture buffer,
+/// 4 transform feedback, 5 compute storage, 6 compute texture buffer.
+inline thread_local int g_write_site = -1;
+inline std::array<std::atomic<u64>, 8> g_write_sites{};
+inline void NoteWriteSite() {
+    g_write_sites[g_write_site >= 0 && g_write_site < 7 ? g_write_site : 7].fetch_add(
+        1, std::memory_order_relaxed);
+}
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
@@ -250,6 +259,17 @@ inline void Log() {
     {
         std::scoped_lock lock{state.mutex};
         draw_pages = state.draw_pages;
+    }
+    {
+        std::array<u64, 8> sites{};
+        for (size_t i = 0; i < sites.size(); ++i) {
+            sites[i] = g_write_sites[i].exchange(0, std::memory_order_relaxed);
+        }
+        LOG_INFO(HW_GPU,
+                 "cmdpage diag: list page writes by site: dma copy {} multi-range storage {} "
+                 "graphics storage {} graphics texture buffer {} transform feedback {} compute "
+                 "storage {} compute texture buffer {} other {}",
+                 sites[0], sites[1], sites[2], sites[3], sites[4], sites[5], sites[6], sites[7]);
     }
     LOG_INFO(HW_GPU,
              "cmdpage diag {:.1f}s: entries submitted {} safe {} copy {} slow {} | slow drained "
