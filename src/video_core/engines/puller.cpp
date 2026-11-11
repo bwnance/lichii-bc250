@@ -108,7 +108,6 @@ enum class AcquireCheck {
     MetByQueued, ///< By a release sent to the word that the back has not run yet
     NotMet,      ///< Nothing sent to the word can meet it yet
     Drain,       ///< Drain the split and read the word as before
-    WaitWrites,  ///< Equal or mask: wait for the queued work that may write the word, then read
 };
 
 // Checks a greater-or-equal acquire without draining the split. The words Switch 2 syncs on only
@@ -152,7 +151,7 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
     }
     if (!reaches && split.QueuedMayWrite(dma_pusher.memory_manager, acquire.address, 4)) {
         VideoCommon::Count(stats.drain_untracked);
-        return AcquireCheck::WaitWrites;
+        return AcquireCheck::Drain;
     }
     const bool met = acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address));
     if (met && !reaches) {
@@ -246,40 +245,6 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         }
         pending_acquire->last_drain = now;
         VideoCommon::Count(stats.valve_drains);
-        break;
-    }
-    case AcquireCheck::WaitWrites: {
-        // Only up to the last queued entry that may write the word, not the whole split: the
-        // back keeps running what comes after. A word the caches now hold newer than memory is
-        // read through a full drain as before.
-        auto& split = VideoCommon::GpuSplit::Get();
-        split.WaitForWrites(dma_pusher.memory_manager, pending_acquire->address, 4);
-        const auto device = dma_pusher.memory_manager.GpuToCpuAddress(pending_acquire->address);
-        if (device && !Nx2MayBeGpuWritten(*device, sizeof(u32)) &&
-            !split.QueuedSemaphoreWriteAt(*device) &&
-            !split.QueuedMayWrite(dma_pusher.memory_manager, pending_acquire->address, 4)) {
-            const bool met =
-                pending_acquire->Matches(dma_pusher.memory_manager.Read<u32>(pending_acquire->address));
-            VerifyWithoutDrain(dma_pusher, *pending_acquire,
-                               met ? AcquireCheck::Met : AcquireCheck::NotMet);
-            if (met) {
-                VideoCommon::Count(stats.passed);
-                VideoCommon::Count(stats.passed_equal);
-                return true;
-            }
-            // Not met yet: as NotMet above (latch, then the 1 ms drain valve).
-            if (Nx2SemaphoreWaiters::Get().Latched(this)) {
-                VideoCommon::Count(stats.latched);
-                return true;
-            }
-            const auto now = std::chrono::steady_clock::now();
-            if (now - pending_acquire->last_drain < std::chrono::milliseconds{1}) {
-                VideoCommon::Count(stats.polls);
-                return false;
-            }
-            pending_acquire->last_drain = now;
-            VideoCommon::Count(stats.valve_drains);
-        }
         break;
     }
     case AcquireCheck::Drain:
