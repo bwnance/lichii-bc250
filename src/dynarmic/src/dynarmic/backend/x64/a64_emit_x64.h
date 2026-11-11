@@ -84,19 +84,19 @@ public:
     // Fastmem information
     using DoNotFastmemMarker = std::tuple<IR::LocationDescriptor, unsigned>;
     /// Where a fastmem access that faults goes: code addresses are offsets in the code space.
-    /// Where a fastmem access that faults goes: code addresses are offsets in the code space.
-    /// 16 bytes: the block's location is kept once per block in fastmem_blocks, and the resume
-    /// address as a short distance from the access (24 bytes before: ~2M entries per emulated
-    /// core in Ocarina of Time, one table per core).
+    /// 20 bytes: the block's location (the same for every access of a block) is kept once per
+    /// block in fastmem_blocks (24 bytes before: ~2M entries per emulated core in Ocarina of
+    /// Time, one table per core). The resume address stays a full offset: it can be in the far
+    /// code region.
     struct FastmemPatchInfo {
         u32 rip;
+        u32 resume_rip;
         u32 callback;
         u32 block; ///< index in fastmem_blocks
-        u32 inst_name : 20;
-        u32 resume_delta : 11; ///< resume rip - rip
+        u32 inst_name : 31;
         u32 recompile : 1;
     };
-    static_assert(sizeof(FastmemPatchInfo) == 16);
+    static_assert(sizeof(FastmemPatchInfo) == 20);
     std::optional<DoNotFastmemMarker> ShouldFastmem(A64EmitContext& ctx, IR::Inst* inst) const;
     void AddFastmemPatch(CodePtr location, CodePtr resume_location, void (*callback)(), const DoNotFastmemMarker& marker, bool recompile);
     FakeCall FastmemCallback(u64 rip);
