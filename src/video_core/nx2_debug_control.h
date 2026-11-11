@@ -98,12 +98,13 @@ void NoteRejectApplied(u64 generation);
 [[nodiscard]] bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout);
 
 /// Experiment switches ported from Fritchii (EDEN_NX2_EXP<n>, read once). Defaults follow the
-/// BC-250 fork: EXP56 (no upload of a cleared depth target), EXP58 (superseded render targets
-/// die) and EXP61 (no empty submits) on; everything else off unless set.
+/// BC-250 fork: EXP48 (hot guest pages stay unprotected: +~1 fps on the owner's Kokiri walk,
+/// 24.5-25.3 vs 23.2-24.5), EXP56, EXP58 and EXP61 on; everything else off unless set.
 inline constexpr int ExperimentCount = 64;
 [[nodiscard]] inline int Experiment(int n) {
     static const std::array<int, ExperimentCount> values = [] {
         std::array<int, ExperimentCount> v{};
+        v[48] = 1;
         v[56] = 1;
         v[58] = 1;
         v[61] = 1;
