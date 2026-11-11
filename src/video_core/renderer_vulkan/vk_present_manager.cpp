@@ -354,6 +354,22 @@ void PresentManager::PresentThread(std::stop_token token) {
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
             CopyToSwapchain(frame);
+            {
+                static std::chrono::steady_clock::time_point last{};
+                const auto now = std::chrono::steady_clock::now();
+                if (last.time_since_epoch().count() != 0) {
+                    const u64 us = static_cast<u64>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(now - last).count());
+                    g_screen_stats.repeats.fetch_add(us > 20000 ? 1 : 0, std::memory_order_relaxed);
+                    g_screen_stats.long_gaps.fetch_add(us > 40000 ? 1 : 0, std::memory_order_relaxed);
+                    u64 worst = g_screen_stats.worst_us.load(std::memory_order_relaxed);
+                    while (us > worst && !g_screen_stats.worst_us.compare_exchange_weak(
+                                             worst, us, std::memory_order_relaxed)) {
+                    }
+                }
+                last = now;
+                g_screen_stats.presents.fetch_add(1, std::memory_order_relaxed);
+            }
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};

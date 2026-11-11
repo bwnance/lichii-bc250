@@ -286,6 +286,16 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
                          game_frames / seconds, extra_frames / seconds,
                          (game_frames + extra_frames) / seconds);
             }
+            auto& screen = g_screen_stats;
+            const u64 presents = screen.presents.exchange(0, std::memory_order_relaxed);
+            if (presents != 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Screen: {:.1f} presents/s, {} repeated frames (gap > 20 ms), {} gaps "
+                         "> 40 ms, worst gap {:.1f} ms in {:.1f} s",
+                         presents / seconds, screen.repeats.exchange(0, std::memory_order_relaxed),
+                         screen.long_gaps.exchange(0, std::memory_order_relaxed),
+                         screen.worst_us.exchange(0, std::memory_order_relaxed) / 1000.0, seconds);
+            }
             window_start = now;
             game_frames = 0;
             extra_frames = 0;
