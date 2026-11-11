@@ -316,6 +316,11 @@ public:
     std::deque<PendingTranscode> pending_transcodes;
     /// Decode images the GPU is done with, for the next texture of the same shape.
     std::vector<PendingTranscode> free_transcodes;
+    /// Moves decode images the GPU is done with to free_transcodes (up to a memory cap; the rest
+    /// are destroyed). Every frame, and before each transcode: a load transcodes hundreds of
+    /// textures in one frame, each decode is submitted at once, and waiting for the frame's end
+    /// kept them all (Ocarina of Time's save load: 449 decode images, 2.3 GB, at the memory peak).
+    void ReclaimFinishedTranscodes();
 
     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
     const Settings::ResolutionScalingInfo& resolution;

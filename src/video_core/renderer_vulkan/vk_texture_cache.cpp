@@ -2955,28 +2955,26 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
     }
 }
 
-void TextureCacheRuntime::TickFrame() {
-    while (!pending_byte_addressed_shadows.empty() &&
-           scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
-        pending_byte_addressed_shadows.pop_front();
+namespace {
+u64 TranscodeDecodeBytes(u32 width, u32 height, u32 levels, u32 layers) {
+    u64 bytes{};
+    for (u32 level = 0; level < levels; ++level) {
+        bytes += u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
     }
-    static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
+    return bytes * layers;
+}
+} // Anonymous namespace
+
+void TextureCacheRuntime::ReclaimFinishedTranscodes() {
     // Finished decode images wait for the next texture of their shape, up to this much memory.
     static constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
-    const auto decode_bytes = [](const PendingTranscode& t) {
-        u64 bytes{};
-        for (u32 level = 0; level < t.levels; ++level) {
-            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
-        }
-        return bytes * t.layers;
-    };
     u64 free_bytes{};
     for (const PendingTranscode& t : free_transcodes) {
-        free_bytes += decode_bytes(t);
+        free_bytes += TranscodeDecodeBytes(t.width, t.height, t.levels, t.layers);
     }
     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
         PendingTranscode& done = pending_transcodes.front();
-        const u64 bytes = decode_bytes(done);
+        const u64 bytes = TranscodeDecodeBytes(done.width, done.height, done.levels, done.layers);
         if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
             done.unused_frames = 0;
             free_bytes += bytes;
@@ -2984,6 +2982,15 @@ void TextureCacheRuntime::TickFrame() {
         }
         pending_transcodes.pop_front();
     }
+}
+
+void TextureCacheRuntime::TickFrame() {
+    while (!pending_byte_addressed_shadows.empty() &&
+           scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
+        pending_byte_addressed_shadows.pop_front();
+    }
+    static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
+    ReclaimFinishedTranscodes();
     std::erase_if(free_transcodes, [](PendingTranscode& t) {
         return ++t.unused_frames > MAX_UNUSED_SCRATCH_FRAMES;
     });
@@ -5159,6 +5166,33 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
     // its storage image view must have the matching R8G8B8A8_UNORM format.
     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    // Decode images in flight are capped (EDEN_NX2_ASTC_PENDING_MIB, default 256; 0: no cap):
+    // over it, wait for the oldest decode to finish. Each decode is submitted at once, so the
+    // wait is short, and only a load transcodes this much in one frame.
+    static const u64 pending_cap = [] {
+        const char* value = std::getenv("EDEN_NX2_ASTC_PENDING_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;
+    }();
+    ReclaimFinishedTranscodes();
+    if (pending_cap != 0) {
+        const u64 needed = TranscodeDecodeBytes(width, height, levels, chunk_layers);
+        const auto pending_bytes = [this] {
+            u64 bytes{};
+            for (const PendingTranscode& t : pending_transcodes) {
+                bytes += TranscodeDecodeBytes(t.width, t.height, t.levels, t.layers);
+            }
+            return bytes;
+        };
+        static u32 cap_waits{};
+        while (!pending_transcodes.empty() && pending_bytes() + needed > pending_cap) {
+            scheduler.Wait(pending_transcodes.front().tick);
+            ReclaimFinishedTranscodes();
+            if (++cap_waits % 64 == 1) {
+                LOG_INFO(Render_Vulkan, "ASTC decode images in flight over {} MiB: waited for the "
+                         "oldest ({} waits so far)", pending_cap >> 20, cap_waits);
+            }
+        }
+    }
     // A decode image of the same shape the GPU is done with: title 1's title screen decodes
     // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
     // shared blocks 90 us, but freeing them there left ~1 GB of those blocks unused.
