@@ -104,6 +104,10 @@ export EDEN_NX2_SPLIT=2          # split GPU thread: the back half runs on its o
 export EDEN_NX2_FENCE_BATCH=1    # batch GPU fence syncpoints
 export EDEN_NX2_FRAMES_AHEAD=2   # the game runs a frame ahead of the GPU threads: 13.6 -> 21.3 fps
 export EDEN_NX2_PRELOAD_ALL_PIPELINES=0  # cached pipelines build on first sight (boots faster)
+# The BC-250 has no mesh hardware, but some Mesa builds (e.g. the BC-250 toolkit's 26.2.6)
+# advertise VK_EXT_mesh_shader anyway; native task/mesh draws then render white. Keep the
+# emulator's own compute fallback, which is what stock Mesa uses.
+export EDEN_NX2_FORCE_MESH_FALLBACK=1
 exec "__REPO_BUILD_DIR__/bin/eden-cli" "$@"
 WRAP
 sed -i "s|__REPO_BUILD_DIR__|$REPO_DIR/build|" "$APP_DIR/lichii-bc250"
