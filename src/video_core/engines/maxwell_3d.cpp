@@ -393,6 +393,11 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     case MAXWELL3D_REG_INDEX(report_semaphore.address_high):
     case MAXWELL3D_REG_INDEX(report_semaphore.address_low):
     case MAXWELL3D_REG_INDEX(report_semaphore.payload):
+    // Methods whose effects ProcessMethodCall weighs itself (see the Method break there): their
+    // register value changing on every occlusion test is not a state change of its own.
+    case MAXWELL3D_REG_INDEX(report_semaphore.query):
+    case MAXWELL3D_REG_INDEX(render_enable.mode):
+    case MAXWELL3D_REG_INDEX(clear_report_value):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
     case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
