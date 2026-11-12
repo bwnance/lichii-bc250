@@ -297,7 +297,9 @@ cd lichii-bc250
 ./tools/bc250/bc250-install.sh --with-shortcut --game "<path to your Ocarina of Time dump>"
 ```
 
-That installs the build dependencies with pacman (asking for sudo once), builds `eden-cli`, installs the wrapper to `~/Applications/lichii-bc250/lichii-bc250` with the
+That installs the build dependencies with pacman (asking for sudo once), adds a udev rule so
+Steam Input can read the sticks of Xbox One S-style Bluetooth pads (045E:02E0, also what 8BitDo
+adapters in X-input mode report; Steam's own rules leave it out), builds `eden-cli`, installs the wrapper to `~/Applications/lichii-bc250/lichii-bc250` with the
 tuning in the wrapper and a per-game config template (`oot.ini`), and — with
 `--with-shortcut` — registers the game as a Steam non-Steam shortcut so it launches from
 Gaming Mode with a controller. The shortcut step needs Steam stopped (the installer tells

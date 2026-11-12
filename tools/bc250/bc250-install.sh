@@ -4,7 +4,8 @@
 # Usage:  ./tools/bc250/bc250-install.sh [--with-shortcut] [--game <path>]
 #
 # What it does:
-#   1. Installs the build dependencies on the host with pacman (asks for sudo once).
+#   1. Installs the build dependencies on the host with pacman (asks for sudo once), and a
+#      udev rule so Steam Input can read Xbox One S-style Bluetooth pads' sticks.
 #   2. Builds the eden-cli binary from this checkout (Release, clang, no Qt).
 #   3. Installs the launch wrapper with the BC-250 tuning and the per-game config template.
 #   4. Optionally registers a Steam non-Steam shortcut for your Ocarina of Time dump
@@ -25,7 +26,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --with-shortcut) WITH_SHORTCUT=1 ;;
         --game) shift; [ $# -gt 0 ] || { echo "--game needs a path"; exit 1; }; GAME_PATH="$1" ;;
-        -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -60,6 +61,22 @@ if [ -n "$MISSING" ]; then
     sudo pacman -S --needed --noconfirm $MISSING
 else
     log "dependencies already installed"
+fi
+
+# --- 1b. Controller access for Steam Input -----------------------------------
+# Steam's own udev rules (steam-devices) give the desktop user the hidraw node of most
+# Bluetooth pads, but not the Xbox One S over Bluetooth (045E:02E0), which 8BitDo adapters
+# and pads in X-input mode also report. Without it Steam falls back to evdev for that pad
+# and passes its buttons to the game but none of its stick movement.
+UDEV_RULE=/etc/udev/rules.d/61-xbox-one-s-bt-hidraw.rules
+UDEV_LINE='KERNEL=="hidraw*", KERNELS=="*045E:02E0*", MODE="0660", TAG+="uaccess"'
+if [ "$(cat "$UDEV_RULE" 2>/dev/null)" != "$UDEV_LINE" ]; then
+    log "adding the Xbox One S Bluetooth hidraw rule for Steam Input ($UDEV_RULE)"
+    echo "$UDEV_LINE" | sudo tee "$UDEV_RULE" >/dev/null
+    sudo udevadm control --reload
+    sudo udevadm trigger --subsystem-match=hidraw
+else
+    log "controller udev rule already present"
 fi
 
 # --- 2. Build ----------------------------------------------------------------
