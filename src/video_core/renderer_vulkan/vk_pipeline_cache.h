@@ -147,6 +147,19 @@ public:
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
+    /// Background translation (EDEN_NX2_BACKGROUND_TRANSLATE, default on): a new pipeline's
+    /// stages translate and build on a worker from environments whose engine state was copied,
+    /// instead of on the GPU thread (17-56 ms each in Ocarina). Starts it for graphics_key;
+    /// false when the pipeline must be built here.
+    bool StartBackgroundGraphics();
+    /// For graphics_key's background build: true once `slot` holds its pipeline (built, waited
+    /// for, or built here after it failed); false when this draw is skipped while it builds.
+    bool TakeBackgroundGraphics(std::unique_ptr<GraphicsPipeline>& slot);
+    /// Whether the current draw may be dropped while its pipeline builds (the async shader rule).
+    [[nodiscard]] bool MaySkipPendingDraw() const;
+    /// Queues a newly built pipeline's environments for the disk cache, as a build here does.
+    void RecordNewPipeline(const GraphicsPipelineCacheKey& key, GraphicsEnvironments& environments);
+
     /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
@@ -278,6 +291,20 @@ private:
     /// IR of the pipelines whose job emits their SPIR-V
     QueuedIrBudget queued_ir{VideoCommon::DefaultShaderJobBudget()};
     std::optional<ScheduledPrebuild<GraphicsPipelineCacheKey, GraphicsPipeline>> scheduled_prebuild;
+    struct BackgroundGraphicsBuild {
+        GraphicsPipelineCacheKey key;
+        std::unique_ptr<GraphicsEnvironments> environments;
+        VideoCommon::ShaderJobHandle job;
+        std::unique_ptr<GraphicsPipeline> pipeline; ///< Set by the job's driver stage
+    };
+    std::optional<VideoCommon::ShaderJobBatch> background_batch;
+    std::unordered_map<GraphicsPipelineCacheKey, std::shared_ptr<BackgroundGraphicsBuild>>
+        background_graphics;
+    struct BackgroundStats {
+        u64 started{}, skipped{}, waited{}, failed{}, done{};
+        double wait_ms{};
+        std::chrono::steady_clock::time_point last_report{};
+    } background_stats;
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};

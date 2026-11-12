@@ -1192,6 +1192,11 @@ void PipelineCache::ReturnPools(std::shared_ptr<ShaderPools> pools) {
 
 void PipelineCache::StopBackgroundJobs() {
     scheduled_prebuild.reset();
+    if (background_batch && shader_jobs) {
+        shader_jobs->Cancel(*background_batch);
+        background_batch->Wait();
+    }
+    background_graphics.clear();
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::TranslateCachedGraphics(
@@ -2005,6 +2010,148 @@ void ReportUnsupportedMeshPipeline(const GraphicsPipelineCacheKey& key, const Pr
 }
 } // Anonymous namespace
 
+namespace {
+bool BackgroundTranslationEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_BACKGROUND_TRANSLATE");
+        const bool on = value == nullptr || value[0] != '0';
+        LOG_INFO(Render_Vulkan, "Background translation of new graphics pipelines: {}",
+                 on ? "on" : "off (EDEN_NX2_BACKGROUND_TRANSLATE=0)");
+        return on;
+    }();
+    return enabled;
+}
+} // Anonymous namespace
+
+bool PipelineCache::StartBackgroundGraphics() {
+    if (!BackgroundTranslationEnabled() || !use_asynchronous_shaders || !shader_jobs) {
+        return false;
+    }
+    // Translation reads texture descriptors; only the GPU thread may flush them, so the table is
+    // flushed here and read without flushing on the worker (as the parallel translation does).
+    static const u64 max_pool_bytes = [] {
+        const char* value = std::getenv("EDEN_NX2_TEX_POOL_FLUSH_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{4}) << 20;
+    }();
+    const auto& tex_header = maxwell3d->regs.tex_header;
+    const u64 pool_bytes = (u64{tex_header.limit} + 1) * sizeof(Tegra::Texture::TICEntry);
+    if (pool_bytes > max_pool_bytes) {
+        return false;
+    }
+    auto build = std::make_shared<BackgroundGraphicsBuild>();
+    build->key = graphics_key;
+    build->environments = std::make_unique<GraphicsEnvironments>();
+    GetGraphicsEnvironments(*build->environments, graphics_key.unique_hashes);
+    gpu_memory->FlushRegion(tex_header.Address(), pool_bytes);
+    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+        if (graphics_key.unique_hashes[index] != 0) {
+            build->environments->envs[index].SetTexturePoolFlushed();
+            build->environments->envs[index].SnapshotState();
+        }
+    }
+    if (!background_batch) {
+        background_batch.emplace(shader_jobs->CreateBatch());
+    }
+    constexpr u64 TranslationBudgetBytes = u64{32} << 20;
+    build->job = shader_jobs->Submit(
+        {
+            .priority = VideoCommon::ShaderJobPriority::NeedNow,
+            .cpu_bytes = TranslationBudgetBytes,
+            .driver_bytes = DriverCompileBytes,
+            .cpu = [this, build](VideoCommon::ShaderJobContext& context)
+                -> VideoCommon::ShaderDriverStage {
+                if (context.StopRequested()) {
+                    return {};
+                }
+                ShaderPools pools;
+                std::unique_ptr<GraphicsPipeline> pipeline = CreateGraphicsPipeline(
+                    pools, build->key, build->environments->Span(), nullptr, false);
+                if (!pipeline) {
+                    return {};
+                }
+                return [build, pipeline = std::move(pipeline)]() mutable {
+                    pipeline->Build();
+                    if (!pipeline->Failed()) {
+                        build->pipeline = std::move(pipeline);
+                    }
+                };
+            },
+        },
+        &*background_batch);
+    background_graphics.emplace(graphics_key, std::move(build));
+    ++background_stats.started;
+    return true;
+}
+
+bool PipelineCache::TakeBackgroundGraphics(std::unique_ptr<GraphicsPipeline>& slot) {
+    const auto it = background_graphics.find(graphics_key);
+    if (it == background_graphics.end()) {
+        return slot != nullptr;
+    }
+    BackgroundGraphicsBuild& build = *it->second;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - background_stats.last_report > std::chrono::seconds{10}) {
+        if (background_stats.started != 0) {
+            LOG_INFO(Render_Vulkan,
+                     "Background translation in the last 10 s: {} started, {} done, {} lookups "
+                     "skipped while building, {} waited for ({:.1f} ms), {} built here after "
+                     "failing",
+                     background_stats.started, background_stats.done, background_stats.skipped,
+                     background_stats.waited, background_stats.wait_ms, background_stats.failed);
+        }
+        background_stats = {};
+        background_stats.last_report = now;
+    }
+    if (!build.job.Ready()) {
+        if (MaySkipPendingDraw()) {
+            ++background_stats.skipped;
+            return false;
+        }
+        shader_jobs->RunOrWait(build.job);
+        ++background_stats.waited;
+        background_stats.wait_ms +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now)
+                .count();
+    }
+    const std::shared_ptr<BackgroundGraphicsBuild> done = std::move(it->second);
+    background_graphics.erase(it);
+    if (done->pipeline) {
+        slot = std::move(done->pipeline);
+        ++background_stats.done;
+        RecordNewPipeline(done->key, *done->environments);
+    } else {
+        // Failed or cancelled on the worker: build it here, as before.
+        ++background_stats.failed;
+        slot = CreateGraphicsPipeline(nullptr);
+    }
+    return slot != nullptr;
+}
+
+bool PipelineCache::MaySkipPendingDraw() const {
+    if (!use_asynchronous_shaders) {
+        return false;
+    }
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    bool skip_native = false;
+    if (native) {
+        static const bool discard_native = [this] {
+            const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
+            return value != nullptr ? value[0] == '1'
+                                    : (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                                       device.GetDriverID() == VK_DRIVER_ID_MESA_RADV);
+        }();
+        skip_native = discard_native ||
+                      Settings::values.native_async_draws.GetValue() == Settings::NativeAsyncDraws::Skip;
+        if (!skip_native) {
+            return false;
+        }
+    }
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    return CanDiscardPendingDraw(native, maxwell3d->regs.zeta_enable != 0,
+                                 draw_state.draw_element_count, draw_state.draw_element_count,
+                                 skip_native);
+}
+
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     namespace StutterTrace = VideoCommon::StutterTrace;
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
@@ -2022,7 +2169,17 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         }
         if (!pipeline) {
             const auto keep = evicted_pointer_slots.Take(graphics_key.Hash());
-            pipeline = CreateGraphicsPipeline(keep ? &*keep : nullptr);
+            if (!keep && StartBackgroundGraphics()) {
+                if (!TakeBackgroundGraphics(pipeline)) {
+                    return nullptr;
+                }
+            } else {
+                pipeline = CreateGraphicsPipeline(keep ? &*keep : nullptr);
+            }
+        }
+    } else if (!pipeline && background_graphics.contains(graphics_key)) {
+        if (!TakeBackgroundGraphics(pipeline)) {
+            return nullptr;
         }
     } else if (StutterTrace::Enabled() && pipeline && !pipeline->WasUsed()) {
         StutterTrace::CountLookup(StutterTrace::Lookup::GraphicsPrebuilt);
@@ -2886,13 +3043,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }
-    if (disk_pipelines.contains(graphics_key.Hash())) {
+    RecordNewPipeline(graphics_key, environments);
+    return pipeline;
+}
+
+void PipelineCache::RecordNewPipeline(const GraphicsPipelineCacheKey& key,
+                                      GraphicsEnvironments& environments) {
+    if (pipeline_cache_filename.empty()) {
+        return;
+    }
+    if (disk_pipelines.contains(key.Hash())) {
         // In the disk cache already, only not built at boot.
         QueueVulkanPipelineCacheFlush();
-        return pipeline;
+        return;
     }
-    disk_pipelines.insert(graphics_key.Hash());
-    serialization_thread.QueueWork([this, key = graphics_key, envs = std::move(environments.envs)] {
+    disk_pipelines.insert(key.Hash());
+    serialization_thread.QueueWork([this, key, envs = std::move(environments.envs)] {
         boost::container::static_vector<const GenericEnvironment*, Maxwell::MaxShaderProgram>
             env_ptrs;
         for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
@@ -2909,7 +3075,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
     });
     QueueVulkanPipelineCacheFlush();
-    return pipeline;
 }
 
 ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipelineCacheKey& key,
