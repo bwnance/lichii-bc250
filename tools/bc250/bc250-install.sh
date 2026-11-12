@@ -3,7 +3,7 @@
 #
 # Usage:  ./tools/bc250/bc250-install.sh [--release <tag>] [--build [--pgo]] [--with-shortcut] [--game <path>]
 #
-#   (default)        download the prebuilt package of the latest GitHub release (PGO build, ~40 MB)
+#   (default)        download the prebuilt package of the latest GitHub release (PGO build, ~100 MB)
 #                    into ~/Applications/lichii-bc250/lichii; nothing is compiled
 #   --release <tag>  download that release instead of the latest (e.g. --release v7)
 #   --build          compile eden-cli from this checkout in a distrobox container instead (30-60 min)
