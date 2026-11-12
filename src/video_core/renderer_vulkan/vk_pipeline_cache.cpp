@@ -2816,7 +2816,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // make it dirty again. A pool too large to flush on every miss translates here as before.
     if (std::ranges::count_if(graphics_key.unique_hashes, [](u64 hash) { return hash != 0; }) >=
         2) {
-        constexpr u64 MaxFlushedTexturePoolBytes = u64{1} << 20;
+        // EDEN_NX2_TEX_POOL_FLUSH_MIB (default 4): Ocarina's pool is 1,058,176 bytes, just over the
+        // former 1 MiB, so each of its new pipelines translated stage by stage on the GPU thread
+        // (40-80 ms, the hitches when new effects first appear).
+        static const u64 MaxFlushedTexturePoolBytes = [] {
+            const char* value = std::getenv("EDEN_NX2_TEX_POOL_FLUSH_MIB");
+            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{4}) << 20;
+        }();
         const auto& tex_header = maxwell3d->regs.tex_header;
         const u64 pool_bytes = (u64{tex_header.limit} + 1) * sizeof(Tegra::Texture::TICEntry);
         if (pool_bytes <= MaxFlushedTexturePoolBytes) {
