@@ -182,7 +182,10 @@ Frame* PresentManager::GetRenderFrame() {
     free_queue.pop_front();
 
     // Wait for the presentation to be finished so all frame resources are free
-    frame->present_done.Wait();
+    {
+        VideoCommon::Nx2Profile::Scope fence_scope{VideoCommon::Nx2Profile::Zone::PresentFence};
+        frame->present_done.Wait();
+    }
     frame->present_done.Reset();
 
     return frame;
@@ -351,6 +354,22 @@ void PresentManager::PresentThread(std::stop_token token) {
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
             CopyToSwapchain(frame);
+            {
+                static std::chrono::steady_clock::time_point last{};
+                const auto now = std::chrono::steady_clock::now();
+                if (last.time_since_epoch().count() != 0) {
+                    const u64 us = static_cast<u64>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(now - last).count());
+                    g_screen_stats.repeats.fetch_add(us > 20000 ? 1 : 0, std::memory_order_relaxed);
+                    g_screen_stats.long_gaps.fetch_add(us > 40000 ? 1 : 0, std::memory_order_relaxed);
+                    u64 worst = g_screen_stats.worst_us.load(std::memory_order_relaxed);
+                    while (us > worst && !g_screen_stats.worst_us.compare_exchange_weak(
+                                             worst, us, std::memory_order_relaxed)) {
+                    }
+                }
+                last = now;
+                g_screen_stats.presents.fetch_add(1, std::memory_order_relaxed);
+            }
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};
@@ -445,8 +464,12 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         return;
     }
 
-    while (swapchain.AcquireNextImage(!use_present_thread)) {
-        RecreateSwapchain(frame);
+    {
+        // On the present thread: the swapchain image acquire (and the pacing wait in it).
+        VideoCommon::Nx2Profile::Scope acquire_scope{VideoCommon::Nx2Profile::Zone::PresentWait};
+        while (swapchain.AcquireNextImage(!use_present_thread)) {
+            RecreateSwapchain(frame);
+        }
     }
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
@@ -593,6 +616,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     }
 
     // Present
+    VideoCommon::Nx2Profile::Scope present_scope{VideoCommon::Nx2Profile::Zone::Present};
     swapchain.Present(render_semaphore);
 }
 

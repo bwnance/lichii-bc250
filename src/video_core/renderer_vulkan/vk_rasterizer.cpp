@@ -20,6 +20,7 @@
 #include <span>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -2321,6 +2322,36 @@ void RasterizerVulkan::SubmitNx2ListCopies() {
     }
 }
 
+namespace {
+// EDEN_NX2_LIST_RTT=1: how long the front waits for the host GPU's copy of a GPU-written command
+// list, split into "not submitted yet" (the copy sits in a deferred submission) and "submitted,
+// GPU still busy", and how many earlier submissions the GPU still had to finish when the list was
+// asked for. Logged every 10 s.
+struct ListRtt {
+    struct Pending {
+        u64 tick;
+        std::chrono::steady_clock::time_point asked;
+        std::optional<std::chrono::steady_clock::time_point> submitted;
+        u64 behind;
+        bool submitted_at_ask;
+    };
+    std::mutex mutex;
+    std::vector<Pending> pending;
+    u64 count{}, submitted_at_ask{}, behind_sum{}, behind_max{};
+    double total_ms{}, unsubmitted_ms{}, gpu_ms{}, max_ms{};
+    std::array<u64, 6> hist{}; // <0.25, <0.5, <1, <2, <4, >=4 ms
+    std::chrono::steady_clock::time_point next_log{};
+};
+bool ListRttEnabled() {
+    static const bool enabled = std::getenv("EDEN_NX2_LIST_RTT") != nullptr;
+    return enabled;
+}
+ListRtt& GetListRtt() {
+    static ListRtt rtt;
+    return rtt;
+}
+} // Anonymous namespace
+
 VideoCore::RasterizerInterface::GpuWrittenList RasterizerVulkan::ReadGpuWrittenCommandList(
     DAddr addr, std::span<u8> out, bool past_sync, u64* pending_tick) {
     // No cache lock: the front only reads the copies, under their own lock.
@@ -2332,6 +2363,20 @@ VideoCore::RasterizerInterface::GpuWrittenList RasterizerVulkan::ReadGpuWrittenC
     case BufferCache::Nx2ListRead::NeedsSync:
         return GpuWrittenList::NeedsSync;
     case BufferCache::Nx2ListRead::Pending:
+        if (ListRttEnabled() && pending_tick != nullptr) {
+            auto& rtt = GetListRtt();
+            const u64 known = scheduler.GetMasterSemaphore().KnownGpuTick();
+            const bool submitted = scheduler.IsSubmitted(*pending_tick);
+            std::scoped_lock lock{rtt.mutex};
+            if (std::ranges::none_of(rtt.pending,
+                                     [t = *pending_tick](const auto& p) { return p.tick == t; })) {
+                const auto now = std::chrono::steady_clock::now();
+                rtt.pending.push_back({*pending_tick, now,
+                                       submitted ? std::optional{now} : std::nullopt,
+                                       *pending_tick > known + 1 ? *pending_tick - known - 1 : 0,
+                                       submitted});
+            }
+        }
         return GpuWrittenList::Pending;
     default:
         return GpuWrittenList::Unknown;
@@ -2348,7 +2393,51 @@ bool RasterizerVulkan::IsGpuTickDone(u64 tick) {
         VideoCommon::GpuSplit::Get().RequestIdleHook();
     }
     scheduler.GetMasterSemaphore().Refresh();
-    return scheduler.IsFree(tick);
+    const bool done = scheduler.IsFree(tick);
+    if (ListRttEnabled()) {
+        auto& rtt = GetListRtt();
+        const auto now = std::chrono::steady_clock::now();
+        const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+        std::scoped_lock lock{rtt.mutex};
+        for (auto it = rtt.pending.begin(); it != rtt.pending.end();) {
+            if (!it->submitted && scheduler.IsSubmitted(it->tick)) {
+                it->submitted = now;
+            }
+            if (!scheduler.IsFree(it->tick)) {
+                ++it;
+                continue;
+            }
+            const double total = ms(now - it->asked);
+            const double unsubmitted = it->submitted ? ms(*it->submitted - it->asked) : total;
+            ++rtt.count;
+            rtt.submitted_at_ask += it->submitted_at_ask ? 1 : 0;
+            rtt.behind_sum += it->behind;
+            rtt.behind_max = (std::max)(rtt.behind_max, it->behind);
+            rtt.total_ms += total;
+            rtt.unsubmitted_ms += unsubmitted;
+            rtt.gpu_ms += total - unsubmitted;
+            rtt.max_ms = (std::max)(rtt.max_ms, total);
+            ++rtt.hist[total < 0.25 ? 0 : total < 0.5 ? 1 : total < 1 ? 2 : total < 2 ? 3 : total < 4 ? 4 : 5];
+            it = rtt.pending.erase(it);
+        }
+        if (now >= rtt.next_log && rtt.count != 0) {
+            rtt.next_log = now + std::chrono::seconds{10};
+            const double n = static_cast<double>(rtt.count);
+            LOG_INFO(Render_Vulkan,
+                     "List RTT: {} pending list copies, avg {:.3f} ms (max {:.2f}): {:.3f} ms until "
+                     "submitted, {:.3f} ms on the GPU after it; {:.0f}% already submitted when asked; "
+                     "earlier submissions still running when asked avg {:.2f} max {} | "
+                     "<0.25 {} <0.5 {} <1 {} <2 {} <4 {} >=4 ms {}",
+                     rtt.count, rtt.total_ms / n, rtt.max_ms, rtt.unsubmitted_ms / n,
+                     rtt.gpu_ms / n, 100.0 * static_cast<double>(rtt.submitted_at_ask) / n,
+                     static_cast<double>(rtt.behind_sum) / n, rtt.behind_max, rtt.hist[0],
+                     rtt.hist[1], rtt.hist[2], rtt.hist[3], rtt.hist[4], rtt.hist[5]);
+            rtt.count = rtt.submitted_at_ask = rtt.behind_sum = rtt.behind_max = 0;
+            rtt.total_ms = rtt.unsubmitted_ms = rtt.gpu_ms = rtt.max_ms = 0.0;
+            rtt.hist = {};
+        }
+    }
+    return done;
 }
 
 void RasterizerVulkan::NoteGpuWrittenCommandListSynced(DAddr page) {

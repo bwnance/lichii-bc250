@@ -22,6 +22,7 @@
 #include "common/spin_recursive_mutex.h"
 #include "common/thread_cpu_clock.h"
 #include "video_core/nx2_stutter_trace.h"
+#include "video_core/nx2_timeline.h"
 
 // EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
@@ -74,6 +75,7 @@ enum class Zone : u32 {
     WorkerIdle,           ///< VulkanWorker waiting for work
     PresentWait,          ///< Present waits for the Vulkan worker or a free presentation frame
     QueueSubmit,          ///< vkQueueSubmit
+    PresentFence,         ///< A free presentation frame waits for its last present's fence
     Count,
 };
 
@@ -88,7 +90,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait", "graphics pipeline miss",
     "compute pipeline miss", "pipeline wait", "shader capture", "texture cache", "GPU wait",
     "present", "worker idle",
-    "present wait", "queue submit",
+    "present wait", "queue submit", "present fence",
 };
 
 static_assert(static_cast<size_t>(Zone::Count) <= StutterTrace::ZoneSlots);
@@ -125,20 +127,21 @@ inline constexpr auto stutter_categories = [] {
     set(Zone::GpuWait, Category::QueryFence);
     set(Zone::Present, Category::Present);
     set(Zone::PresentWait, Category::Present);
+    set(Zone::PresentFence, Category::Present);
     return categories;
 }();
 
 // A plain flag: Enabled() runs several times per method write (no guard to check).
 inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
 /// Whether zones measure: for the profile or for EDEN_NX2_STUTTER_TRACE.
-inline bool g_zones_enabled = g_enabled || StutterTrace::ReadEnv();
+inline bool g_zones_enabled = g_enabled || StutterTrace::ReadEnv() || Nx2Timeline::Enabled();
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
     g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
     StutterTrace::ReadSwitch();
-    g_zones_enabled = g_enabled || StutterTrace::Enabled();
+    g_zones_enabled = g_enabled || StutterTrace::Enabled() || Nx2Timeline::Enabled();
     Common::g_count_spin_contention = g_enabled;
 }
 
@@ -205,6 +208,7 @@ public:
         }
         const u64 end = Ticks();
         const u64 elapsed = end - start;
+        Nx2Timeline::Record(static_cast<u32>(zone), start, end);
         auto& data = t_data;
         const auto index = static_cast<size_t>(zone);
         const u64 exclusive = elapsed - data.child_ns;

@@ -1,12 +1,17 @@
 #!/bin/bash
 # lichii-bc250 installer for the AMD BC-250 console (CachyOS).
 #
-# Usage:  ./tools/bc250/bc250-install.sh [--with-shortcut] [--game <path>]
+# Usage:  ./tools/bc250/bc250-install.sh [--pgo] [--with-shortcut] [--game <path>]
+#
+#   --pgo            build with LLVM 23 and the bundled Lichii profile (~10% more fps; downloads
+#                    ~2 GB once and keeps ~600 MB of it in ~/.local/share/lichii-bc250/llvm23)
+#   --with-shortcut  add a Steam non-Steam shortcut (needs --game and Steam stopped)
+#   --game <path>    your own Ocarina of Time dump, for the shortcut
 #
 # What it does:
 #   1. Installs the build dependencies on the host with pacman (asks for sudo once), and a
 #      udev rule so Steam Input can read Xbox One S-style Bluetooth pads' sticks.
-#   2. Builds the eden-cli binary from this checkout (Release, clang, no Qt).
+#   2. Builds the eden-cli binary from this checkout (Release, clang, no Qt; PGO with --pgo).
 #   3. Installs the launch wrapper with the BC-250 tuning and the per-game config template.
 #   4. Optionally registers a Steam non-Steam shortcut for your Ocarina of Time dump
 #      (requires Steam to be stopped; the installer tells you when).
@@ -21,12 +26,16 @@ APP_DIR="$HOME/Applications/lichii-bc250"
 INSTALL_USER="${SUDO_USER:-$USER}"
 
 WITH_SHORTCUT=0
+WITH_PGO=0
+LLVM_VERSION=23.1.5
+LLVM_DIR="$HOME/.local/share/lichii-bc250/llvm23"
 GAME_PATH=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --with-shortcut) WITH_SHORTCUT=1 ;;
+        --pgo) WITH_PGO=1 ;;
         --game) shift; [ $# -gt 0 ] || { echo "--game needs a path"; exit 1; }; GAME_PATH="$1" ;;
-        -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -49,7 +58,7 @@ fi
 
 # --- 1. Build dependencies ----------------------------------------------------
 DEPS=(
-    base-devel git autoconf cmake ninja pkgconf clang nasm patch make jq
+    base-devel git curl autoconf cmake ninja pkgconf clang nasm patch make jq
     fmt glslang spirv-tools hidapi nlohmann-json libtool libusb zstd lz4 openssl
     libpulse speexdsp wayland zlib ffmpeg libxext boost sdl3
 )
@@ -81,24 +90,52 @@ fi
 
 # --- 2. Build ----------------------------------------------------------------
 cd "$REPO_DIR"
+CMAKE_ARGS=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DYUZU_CMD=ON
+            -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF
+            -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF)
+if [ "$WITH_PGO" = 1 ]; then
+    BUILD_DIR="$REPO_DIR/build-pgo"
+    PROFILE="$REPO_DIR/lichii-linux.profdata"
+    [ -f "$PROFILE" ] || { echo "missing $PROFILE (the PGO profile ships with the repo)" >&2; exit 1; }
+    if [ ! -x "$LLVM_DIR/bin/clang" ]; then
+        # The profile needs LLVM 23; the distro's clang may not read it. Only the compiler,
+        # linker, archiver and clang's own headers are kept (~600 MB of the 12 GB release).
+        log "downloading LLVM $LLVM_VERSION (~2 GB, streamed; keeps ~600 MB)"
+        mkdir -p "$LLVM_DIR"
+        curl -fL "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/LLVM-$LLVM_VERSION-Linux-X64.tar.xz" |
+            tar -xJ -C "$LLVM_DIR" --strip-components=1 --wildcards \
+                "*/bin/clang" "*/bin/clang++" "*/bin/clang-[0-9]*" "*/bin/lld" "*/bin/ld.lld" \
+                "*/bin/llvm-ar" "*/bin/llvm-ranlib" "*/lib/clang/*"
+        [ -x "$LLVM_DIR/bin/clang" ] || { echo "LLVM download failed" >&2; exit 1; }
+    fi
+    PGO_FLAGS="-fprofile-use=$PROFILE -Wno-backend-plugin -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+    CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$LLVM_DIR/bin/clang" -DCMAKE_CXX_COMPILER="$LLVM_DIR/bin/clang++"
+                 -DCMAKE_AR="$LLVM_DIR/bin/llvm-ar" -DCMAKE_RANLIB="$LLVM_DIR/bin/llvm-ranlib"
+                 -DCMAKE_C_FLAGS="$PGO_FLAGS" -DCMAKE_CXX_FLAGS="$PGO_FLAGS"
+                 -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DENABLE_LTO=OFF)
+else
+    BUILD_DIR="$REPO_DIR/build"
+    CMAKE_ARGS+=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)
+fi
 # A build tree configured inside the old Fedora distrobox points at that container's
 # libraries; move it aside so this host configures afresh.
-if [ -f build/CMakeCache.txt ] && [ ! -f build/.lichii-native ]; then
-    OLD="build.distrobox-$(date +%Y%m%d%H%M%S)"
+if [ -f "$BUILD_DIR/CMakeCache.txt" ] && [ ! -f "$BUILD_DIR/.lichii-native" ]; then
+    OLD="$BUILD_DIR.distrobox-$(date +%Y%m%d%H%M%S)"
     log "moving the old container-built tree aside to $OLD (delete it when you like)"
-    mv build "$OLD"
+    mv "$BUILD_DIR" "$OLD"
 fi
-log "building eden-cli (Release, ~15-30 min on the BC-250; first build is the slow one)"
-if [ ! -f build/CMakeCache.txt ]; then
-    cmake -S "$REPO_DIR" -B "$REPO_DIR/build" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF \
-        -DYUZU_ROOM=OFF -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF \
-        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-    touch "$REPO_DIR/build/.lichii-native"
+log "building eden-cli in $BUILD_DIR (Release, ~30-60 min on the BC-250; first build is the slow one)"
+if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
+    cmake -S "$REPO_DIR" -B "$BUILD_DIR" "${CMAKE_ARGS[@]}"
+    touch "$BUILD_DIR/.lichii-native"
+else
+    # Re-run configure so the version string matches the checkout (it is only set there).
+    cmake "$BUILD_DIR" >/dev/null
 fi
-cmake --build "$REPO_DIR/build" --target eden-cli --parallel 4
-[ -x "$REPO_DIR/build/bin/eden-cli" ] || { echo "build failed: no eden-cli" >&2; exit 1; }
-log "built $REPO_DIR/build/bin/eden-cli"
+# 4 jobs: more can run the 16 GB box out of memory on the largest files.
+cmake --build "$BUILD_DIR" --target eden-cli --parallel 4
+[ -x "$BUILD_DIR/bin/eden-cli" ] || { echo "build failed: no eden-cli" >&2; exit 1; }
+log "built $BUILD_DIR/bin/eden-cli"
 
 # --- 3. Wrapper and config ----------------------------------------------------
 log "installing the launch wrapper to $APP_DIR"
@@ -127,7 +164,7 @@ export EDEN_NX2_PRELOAD_ALL_PIPELINES=0  # cached pipelines build on first sight
 export EDEN_NX2_FORCE_MESH_FALLBACK=1
 exec "__REPO_BUILD_DIR__/bin/eden-cli" "$@"
 WRAP
-sed -i "s|__REPO_BUILD_DIR__|$REPO_DIR/build|" "$APP_DIR/lichii-bc250"
+sed -i "s|__REPO_BUILD_DIR__|$BUILD_DIR|" "$APP_DIR/lichii-bc250"
 chmod +x "$APP_DIR/lichii-bc250"
 
 if [ ! -f "$APP_DIR/oot.ini" ]; then
@@ -156,6 +193,8 @@ frame_gen_flow_scale\default=false
 frame_gen_flow_scale=50
 frame_gen_target_rate\default=false
 frame_gen_target_rate=0
+frame_gen_queue_target\default=false
+frame_gen_queue_target=1
 pin_gpu_threads\default=false
 pin_gpu_threads=true
 scaling_filter\default=false
@@ -991,19 +1030,31 @@ microphone_volume\default=true
 microphone_volume=100
 INI
 else
-    log "keeping the existing $APP_DIR/oot.ini"
+    # Keep the user's file (controls, their own changes) but bring the tuned frame
+    # generation settings up to date: v4 always 2x, v5 a 4-frame presentation queue.
+    log "keeping the existing $APP_DIR/oot.ini; updating its frame generation settings"
+    for kv in frame_gen=true frame_gen_type=1 frame_gen_multiplier=2 frame_gen_target_rate=0 \
+              frame_gen_queue_target=1; do
+        key=${kv%%=*}
+        if grep -q "^$key=" "$APP_DIR/oot.ini"; then
+            sed -i "s|^$key=.*|$kv|; s|^$key\\\\default=.*|$key\\\\default=false|" "$APP_DIR/oot.ini"
+        else
+            sed -i "/^\\[Renderer\\]/a $key\\\\default=false\\n$kv" "$APP_DIR/oot.ini"
+        fi
+    done
 fi
 
-cat <<'DONE'
+B=$'\033[1m' N=$'\033[0m'
+cat <<DONE
 
-\033[1mInstalled.\033[0m Launch the game with:
+${B}Installed.${N} Launch the game with:
 
-  $APP_DIR/lichii-bc250 -f -g "<path to your Ocarina of Time dump>"
+  $APP_DIR/lichii-bc250 -f -c $APP_DIR/oot.ini -g "<path to your Ocarina of Time dump>"
 
-Run the wrapper with  -c "$APP_DIR/oot.ini"  for the tuned per-game settings
-(every \default flag matters: without them the loader ignores your values).
+The -c file holds the tuned per-game settings (every \\default=false line matters:
+without it the loader ignores the value next to it).
 
-\033[1mFirst launch:\033[0m the screen stays black for 3-5 minutes while the
+${B}First launch:${N} the screen stays black for 3-5 minutes while the
 shader pipelines are prepared. This is normal, happens once per game version
 per emulator build, and shrinks on later boots as the cache fills.
 

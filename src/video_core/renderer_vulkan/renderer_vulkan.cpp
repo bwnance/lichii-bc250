@@ -234,6 +234,12 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     if (VideoCommon::StutterTrace::Enabled()) {
         VideoCommon::StutterTrace::OnPresent();
     }
+    if (VideoCommon::Nx2Timeline::Enabled()) {
+        namespace Profile = VideoCommon::Nx2Profile;
+        VideoCommon::Nx2Timeline::OnPresent([] { return Profile::Now(); },
+                                            [] { return Profile::Ticks(); }, Profile::zone_names,
+                                            static_cast<u32>(Profile::Zone::Present));
+    }
     RenderScreenshot(framebuffers);
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
@@ -279,6 +285,16 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
                          "Frame gen output: {:.1f} game fps + {:.1f} generated fps = {:.1f} fps",
                          game_frames / seconds, extra_frames / seconds,
                          (game_frames + extra_frames) / seconds);
+            }
+            auto& screen = g_screen_stats;
+            const u64 presents = screen.presents.exchange(0, std::memory_order_relaxed);
+            if (presents != 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Screen: {:.1f} presents/s, {} repeated frames (gap > 20 ms), {} gaps "
+                         "> 40 ms, worst gap {:.1f} ms in {:.1f} s",
+                         presents / seconds, screen.repeats.exchange(0, std::memory_order_relaxed),
+                         screen.long_gaps.exchange(0, std::memory_order_relaxed),
+                         screen.worst_us.exchange(0, std::memory_order_relaxed) / 1000.0, seconds);
             }
             window_start = now;
             game_frames = 0;

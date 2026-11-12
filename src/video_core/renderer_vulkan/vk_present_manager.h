@@ -22,6 +22,17 @@ class EmuWindow;
 
 namespace Vulkan {
 
+/// What reached the screen, counted by the present thread: presents, and gaps between two
+/// presents over 20 ms (the display showed a frame again) and over 40 ms. Read and reset by the
+/// renderer's 10 s frame generation log.
+struct ScreenStats {
+    std::atomic<u64> presents{};
+    std::atomic<u64> repeats{};
+    std::atomic<u64> long_gaps{};
+    std::atomic<u64> worst_us{};
+};
+inline ScreenStats g_screen_stats;
+
 class Device;
 class Scheduler;
 class Swapchain;

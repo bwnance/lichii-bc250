@@ -318,16 +318,6 @@ size_t Maxwell3D::EstimateIndexBufferSize() {
     return std::min<size_t>(memory_manager.GetMemoryLayoutSize(start_address, byte_size * max_size) / byte_size, lower_cap);
 }
 
-u32 Maxwell3D::ProcessShadowRam(u32 method, u32 argument) {
-    // Keep track of the register value in shadow_state when requested.
-    auto const c = shadow_state.shadow_ram_control;
-    if (c == Regs::ShadowRamControl::Track || c == Regs::ShadowRamControl::TrackWithFilter)
-        return shadow_state.reg_array[method] = argument;
-    else if (c == Regs::ShadowRamControl::Replay)
-        return shadow_state.reg_array[method];
-    return argument;
-}
-
 void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     if (front_macros && !VideoCommon::GpuSplit::OnBackThread()) {
         ReleaseFront();
@@ -356,22 +346,6 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     method_sink.clear();
 }
 
-void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
-    // The instances after the first are drawn together once their loop ends, and they must see
-    // the state they were begun with: NVN's draw macros reset the base instance (and its copy in
-    // c[0][0x644]) right after the loop, before the macro returns.
-    if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
-        draw_manager.DrawDeferred(*this, true);
-    }
-    if (VideoCommon::Nx2FastDraw::Enabled() && regs.reg_array[method] != argument &&
-        !IsFastDrawParameter(method)) {
-        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
-    }
-    regs.reg_array[method] = argument;
-    for (auto const& table : dirty.tables)
-        dirty.flags[table[method]] = true;
-}
-
 bool Maxwell3D::IsFastDrawParameter(u32 method) {
     switch (method) {
     case MAXWELL3D_REG_INDEX(const_buffer.size):
@@ -380,6 +354,24 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     case MAXWELL3D_REG_INDEX(const_buffer.offset):
     case MAXWELL3D_REG_INDEX(global_base_vertex_index):
     case MAXWELL3D_REG_INDEX(global_base_instance_index):
+    // Written by the draw macros on nearly every indexed draw (OoT: ~40k/s) and read by nothing
+    // that a resolve produces (no dirty table, no renderer or shader use), so it must not force a
+    // full resolve.
+    case MAXWELL3D_REG_INDEX(vertex_id_base):
+    // The macro engine's memory-read address (MemAddressA/B, see macro.cpp): only the macro's own
+    // DMA reads use it. OoT's memory-reading macros rewrite it before ~25k draws/s.
+    case 0x154:
+    case 0x155:
+    // The next report's address and payload: the report itself is checked when it is written
+    // (ReportMayReachDrawState). OoT points a new occlusion report at them per test.
+    case MAXWELL3D_REG_INDEX(report_semaphore.address_high):
+    case MAXWELL3D_REG_INDEX(report_semaphore.address_low):
+    case MAXWELL3D_REG_INDEX(report_semaphore.payload):
+    // Methods whose effects ProcessMethodCall weighs itself (see the Method break there): their
+    // register value changing on every occlusion test is not a state change of its own.
+    case MAXWELL3D_REG_INDEX(report_semaphore.query):
+    case MAXWELL3D_REG_INDEX(render_enable.mode):
+    case MAXWELL3D_REG_INDEX(clear_report_value):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
     case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
@@ -406,6 +398,30 @@ bool Maxwell3D::IsFastDrawVertexBuffer(u32 method) {
            (method >= limits && method < limits + Regs::NumVertexArrays * limit_words);
 }
 
+bool Maxwell3D::ReportMayReachDrawState() const {
+    // A query or semaphore report writes at most 16 bytes at the report address. A delta draw
+    // keeps the texture and sampler headers and the handles it read from constant buffers, so a
+    // report that lands on the header tables or on any bound graphics constant buffer must still
+    // end the delta chain; one into a plain report buffer (occlusion results) leaves it alone.
+    const GPUVAddr begin = regs.report_semaphore.Address();
+    const GPUVAddr end = begin + 16;
+    const auto overlaps = [begin, end](GPUVAddr base, u64 size) {
+        return size != 0 && begin < base + size && base < end;
+    };
+    if (overlaps(regs.tex_header.Address(), (u64{regs.tex_header.limit} + 1) * 32) ||
+        overlaps(regs.tex_sampler.Address(), (u64{regs.tex_sampler.limit} + 1) * 32)) {
+        return true;
+    }
+    for (const auto& stage : state.shader_stages) {
+        for (const auto& buffer : stage.const_buffers) {
+            if (buffer.enabled && overlaps(buffer.address, buffer.size)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
     if (method >= cb_data && method < cb_data + Regs::NumCBData) {
@@ -424,7 +440,14 @@ bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
-    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method)) {
+    // Query counter resets and render-enable (conditional rendering) changes leave everything a
+    // delta draw keeps (pipeline, image views, samplers, texture buffers) as it was: whether a draw
+    // runs is still decided per draw, and anything they do to the command buffer or render pass
+    // ends the delta chain through those checks. OoT wraps ~25k draws/s in them (occlusion tests).
+    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method) &&
+        method != MAXWELL3D_REG_INDEX(clear_report_value) &&
+        method != MAXWELL3D_REG_INDEX(render_enable.mode) &&
+        (method != MAXWELL3D_REG_INDEX(report_semaphore.query) || ReportMayReachDrawState())) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
@@ -540,6 +563,15 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
     if (front_macros && !VideoCommon::GpuSplit::OnBackThread()) {
         ReleaseFront();
     }
+    // About half of the split back's 3D writes (~5 million a second in Ocarina of Time) are state
+    // registers: CallMethodFast's state write, here without the calls to it. A register not in
+    // execution_mask is not SET_SHADOW_RAM_CONTROL either (CallMethodSlow's). The verify switch
+    // takes the longer path below; the profile, the write history and the first-write trace
+    // leave fast_maxwell3d off.
+    if (fast_maxwell3d && executing_macro == 0 && method < MacroRegistersStart &&
+        !execution_mask[method] && !perf_verify) {
+        return WriteStateRegister(method, method_argument);
+    }
     if (!fast_maxwell3d || executing_macro != 0 || method >= MacroRegistersStart ||
         method == MAXWELL3D_REG_INDEX(shadow_ram_control)) {
         return CallMethodSlow(system, method, method_argument, is_last_call);
@@ -571,13 +603,10 @@ bool IsStoreOnlyExecutable(u32 method) {
 // no write history, trace or profile, not a macro call or SET_SHADOW_RAM_CONTROL. The hot
 // executable methods go straight to their handler.
 void Maxwell3D::CallMethodFast(u32 method, u32 method_argument, bool is_last_call) {
-    const u32 argument = ProcessShadowRam(method, method_argument);
     if (!execution_mask[method]) {
-        if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
-            ProcessDirtyRegisters(method, argument);
-        }
-        return;
+        return WriteStateRegister(method, method_argument);
     }
+    const u32 argument = ProcessShadowRam(method, method_argument);
     ProcessDirtyRegisters(method, argument);
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
     if (method - cb_data < 16) {
@@ -1791,7 +1820,10 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
                 AsyncReadback::MaybeReport();
             }
         },
-        fs.parameters);
+        // Neutral for fast draws: the macro only reads memory itself, and every register write,
+        // method or draw it makes goes through CallMethod, which ends the delta chain whenever
+        // that write does.
+        fs.parameters, VideoCommon::GpuSplit::Writes::Anywhere, VideoCommon::GpuSplit::FastDrawNeutral);
     const u64 position = split.Position();
     fs.back_last = position;
     const bool tracked = fs.control == Regs::ShadowRamControl::Track ||
