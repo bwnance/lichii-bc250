@@ -283,7 +283,7 @@ public:
         SparsePages,
         DeviceBuffers,
     };
-    /// VMA block size for the default blocks and the separate pools: 16 MiB, or
+    /// VMA block size for the default blocks and the separate pools: 8 MiB, or
     /// EDEN_NX2_VMA_BLOCK_MIB (1-256). Allocations over half a block get memory of their own.
     static VkDeviceSize SeparatePoolBlockSize();
 

@@ -1144,7 +1144,11 @@ VkDeviceSize Device::SeparatePoolBlockSize() {
             LOG_INFO(Render_Vulkan, "EDEN_NX2_VMA_BLOCK_MIB: {} MiB device memory blocks", mib);
             return VkDeviceSize{mib} << 20;
         }
-        return VkDeviceSize{16} << 20;
+        // 8 MiB: Ocarina's Castle Town on the BC-250 left 464 MiB free inside 16 MiB blocks (19%)
+        // and 22 MiB inside 8 MiB ones; device memory in use at the peak 5453 -> 5056 MiB, the
+        // castle route 54.4 -> 55.0-55.1 screen fps. 4 MiB saved nothing more and was slower
+        // (more allocations of their own: 47.7 fps).
+        return VkDeviceSize{8} << 20;
     }();
     return size;
 }
