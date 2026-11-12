@@ -2512,6 +2512,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
     }
+    MarkBuildPhase(2);
     // Each stage stays within the limit on its own; together they share one descriptor set.
     if (const u32 set_limit = host_info.max_descriptor_set_storage_buffers; set_limit != 0) {
         size_t storage_buffers{};
@@ -2650,6 +2651,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             mapped_pointers[index] = envs[mapped_env++]->MappedStoragePointerKeys();
         }
     }
+    MarkBuildPhase(3);
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
@@ -2657,6 +2659,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
         std::move(mesh_emulation));
     pipeline->SetMappedPointers(std::move(mapped_pointers));
+    MarkBuildPhase(4);
     return pipeline;
 
 } catch (const Shader::Exception& exception) {
@@ -2681,6 +2684,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     LOG_ERROR(Render_Vulkan, "{}", exception.what());
     return nullptr;
 }
+
+namespace {
+// Phase marks of the pipeline build running on this thread (for the slow-build log line).
+thread_local std::array<std::chrono::steady_clock::time_point, 6> t_build_marks{};
+void MarkBuildPhase(size_t phase) {
+    t_build_marks[phase] = std::chrono::steady_clock::now();
+}
+} // Anonymous namespace
 
 namespace {
 // Pipelines built on the GPU thread at run time (shader translation, and the SPIR-V unless a worker
@@ -2779,9 +2790,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     const VideoCommon::Nx2Profile::Scope profile_scope{
         VideoCommon::Nx2Profile::Zone::GraphicsPipelineMiss};
     const auto begin = std::chrono::steady_clock::now();
+    t_build_marks.fill(begin);
     std::optional<ParallelTranslation> parallel;
     SCOPE_EXIT {
-        std::string shaders = fmt::format("pipeline={:016x}", graphics_key.Hash());
+        const auto end = std::chrono::steady_clock::now();
+        const auto span = [](auto a, auto b) {
+            return b > a ? std::chrono::duration<double, std::milli>(b - a).count() : 0.0;
+        };
+        auto& m = t_build_marks;
+        // env: guest shader environments; flush: texture pool flush; translate: stages to IR;
+        // prepare: checks, mesh emulation, layouts; construct: the GraphicsPipeline object
+        // (SPIR-V, driver build hand-off); after: the rest of the miss.
+        std::string shaders = fmt::format(
+            "env={:.1f} flush={:.1f} translate={:.1f} prepare={:.1f} construct={:.1f} after={:.1f} "
+            "pipeline={:016x}",
+            span(begin, m[0]), span(m[0], m[1]), span(m[1], m[2]), span(m[2], m[3]),
+            span(m[3], m[4]), span(m[4], end), graphics_key.Hash());
         for (size_t stage = 0; stage < graphics_key.unique_hashes.size(); ++stage) {
             if (graphics_key.unique_hashes[stage] != 0) {
                 shaders += fmt::format(" s{}:{:016x}", stage, graphics_key.unique_hashes[stage]);
@@ -2798,6 +2822,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     };
     GraphicsEnvironments environments;
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
+    MarkBuildPhase(0);
     if (keep_pointers) {
         for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
             if (graphics_key.unique_hashes[index] == 0) {
@@ -2852,6 +2877,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         main_pools.ReleaseContents();
     }
     ShaderPools& pools = emit_pools ? *emit_pools : main_pools;
+    MarkBuildPhase(1);
+    MarkBuildPhase(2);
+    MarkBuildPhase(3);
+    MarkBuildPhase(4);
     auto pipeline{CreateGraphicsPipeline(pools, graphics_key, environments.Span(), nullptr, true,
                                          std::move(emit_pools), parallel ? &*parallel : nullptr)};
     if (!pipeline || pipeline_cache_filename.empty()) {
