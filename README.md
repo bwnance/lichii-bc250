@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v4
+# lichii-bc250 v5
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -30,6 +30,39 @@ top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
 ## Changelog
 
 The title carries the version of `main`; it goes up by one with every merge into `main`.
+
+### v5 — 2026-11-12: smoother frame delivery, Lichii build 160 picks, measuring tools
+
+- **Deeper presentation queue:** the template sets `frame_gen_queue_target=1` (4 presentation
+  frames instead of 3). Frames that come out early bank time for late ones, so frames reach
+  the TV more evenly. On the TV it felt much smoother, near-stable 60 after a few minutes,
+  with no noticeable input lag. To go back, set `frame_gen_queue_target=0`.
+- **What 60 fps looks like on this route:** five-minute loops (walk, camera spin, walk back)
+  show the screen at 59.9-60 fps with almost no repeated frames from the second minute on;
+  the game holds 30 fps. The first minute after an area load is still rough (~52 fps on
+  screen): the load fills memory and the kernel swaps about 3 GB out, then pages part of it
+  back in. That is the next target.
+- **From Lichii build 160:** #1095 (3D state registers written in one call), #1332 (front and
+  back counters on separate cache lines), #1347 (shader clamp folding) and #1333 (read-only
+  native compute bindings sized from their size word). #1333 replaces this fork's
+  `EDEN_NX2_NATIVE_COMPUTE_FULL` opt-in: Ocarina no longer gets a 1 GiB buffer. The advertised
+  shader compile speed-up (#1320) was already in v4.
+- **More draws take the light (delta) path:** OoT's per-draw occlusion tests (counter resets,
+  render-enable changes, report writes) and its macros' memory-read registers no longer force a
+  full draw setup; `EDEN_NX2_FAST_DRAW_VERIFY=1` found no difference in five runs. No
+  measurable fps change on its own.
+- **New diagnostics (all off by default):**
+  - a `Screen:` log line every 10 s: presents per second and frames the TV showed twice;
+  - `EDEN_NX2_TIMELINE=<file>`: a Chrome-trace timeline of the GPU threads, started by
+    creating `/tmp/nx2-timeline-go`;
+  - `EDEN_NX2_LIST_RTT=1`: latency of GPU-written command lists;
+  - `EDEN_NX2_CMDPAGE_DIAG=1`: now also counts which GPU path writes them.
+- **Investigated without a gain, so not in v5:**
+  - skipping drains on equal/mask semaphore waits;
+  - parking channels while their command lists are written;
+  - Mailbox and FIFO-relaxed present modes;
+  - a third GPU thread (the front/back split already separates register processing from
+    draws).
 
 ### v4 — 2026-11-11 (night): frame generation always 2x (~60 fps on screen)
 
@@ -173,10 +206,10 @@ two runs each): **~25 fps** world rate, peak GPU memory ~6.4-6.5 GB, image notic
   layers) became 967 MiB each and the board ran out of memory (peak GPU memory 6.9 GB).
 - **Large ASTC arrays are re-compressed a few layers at a time** (`EDEN_NX2_ASTC_CHUNK_MIB`,
   default 64): the two 967 MiB decode images at every Kokiri Forest load are gone.
-- **Native compute storage bindings keep the 8 MiB cap** unless
-  `EDEN_NX2_NATIVE_COMPUTE_FULL=1`. Build 150's Mario Kart World fix (#1231) made Ocarina
-  keep one 1 GiB buffer: peak GPU memory 6.3 -> 8.7 GB, more swapping and drops, no visible
-  change.
+- **Native compute storage bindings keep the 8 MiB cap** and grow only through a plausible size
+  word (upstream #1333, since v5; it replaced this fork's `EDEN_NX2_NATIVE_COMPUTE_FULL`
+  opt-in). Build 150's Mario Kart World fix (#1231) made Ocarina keep one 1 GiB buffer: peak
+  GPU memory 6.3 -> 8.7 GB, more swapping and drops, no visible change.
 - **Mesh emulation arenas start at 16 MiB** (`EDEN_NX2_MESH_ARENA_MIB`; they grow when
   needed): Ocarina needs at most ~10 MiB a submission but kept six 64 MiB arenas (384 MiB),
   now 64-80 MiB. `EDEN_NX2_MESH_ARENA_LOG=1` logs the usage.
@@ -276,7 +309,7 @@ some upstream source exports, and the build fails without it).
 - FSR3 frame generation (`frame_gen`, type `Fsr3`) works; it acts after the game presents,
   so in-emulator frame counters do not include generated frames (the log reports both every
   10 s). Keep `frame_gen_target_rate=0` (always 2x); a target of 60 throttles the game to 20 fps
-  (see v4 in the changelog).
+  (see v4 in the changelog). `frame_gen_queue_target=1` gives smoother delivery (v5).
 
 ## Installation on the BC-250
 
