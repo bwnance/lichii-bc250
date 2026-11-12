@@ -1,0 +1,178 @@
+name: bc250-release
+
+# Builds the BC-250 package (eden-cli only, no Qt GUI) and publishes it as a GitHub release when a
+# version tag (v7, v7.1, ...) is pushed. The installer downloads this package, so people don't have
+# to build the emulator themselves (tools/bc250/bc250-install.sh; --build compiles from source).
+#
+# Compatibility: built on Ubuntu 24.04 (glibc 2.39) and packaged with linuxdeploy, which bundles
+# every library eden-cli needs except the base system ones (glibc, the Vulkan loader, the GPU
+# driver, X11/Wayland client libraries). Bazzite and CachyOS both ship a newer glibc, and the host's
+# own Mesa (RADV) driver is used, so the BC-250 image's patched driver keeps working. Only a
+# tar.gz is published: AppImages need FUSE, whose mount has been unreliable on Bazzite.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (for a re-run)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bc250-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # The PGO profile (lichii-linux.profdata) is written by LLVM 23; older clang can't read it.
+  PGO_LLVM_VERSION: "23"
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: linux-x86_64 (PGO)
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3000M
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev mesa-common-dev nasm ninja-build \
+            libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
+            libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev \
+            libopus-dev libasound2-dev ccache file
+
+      # Versioned packages from apt.llvm.org: Ubuntu's clang 18 can't read the profile.
+      - name: Install clang ${{ env.PGO_LLVM_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-$PGO_LLVM_VERSION main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            "clang-$PGO_LLVM_VERSION" "lld-$PGO_LLVM_VERSION" "llvm-$PGO_LLVM_VERSION"
+          "clang-$PGO_LLVM_VERSION" --version
+          test -s lichii-linux.profdata
+
+      - name: Restore CPM downloads
+        id: cpm-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/cpm
+          key: bc250-cpm-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'CMakeModules/CPM*.cmake', 'externals/**/CMakeLists.txt', 'src/**/CMakeLists.txt') }}
+          restore-keys: bc250-cpm-
+
+      - name: Restore compiler objects
+        id: ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: bc250-objects-${{ hashFiles('lichii-linux.profdata') }}-${{ github.sha }}
+          restore-keys: bc250-objects-${{ hashFiles('lichii-linux.profdata') }}-
+
+      # Same options as the installer's --pgo build (tools/bc250/bc250-install.sh), plus the
+      # bundled SDL3 and Vulkan headers so the result doesn't depend on Ubuntu's versions.
+      - name: Configure
+        run: |
+          set -euo pipefail
+          profile="-fprofile-use=$PWD/lichii-linux.profdata -Wno-backend-plugin \
+            -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_QT=OFF -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF \
+            -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF \
+            -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=OFF \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DUSE_CCACHE=ON -DENABLE_LTO=OFF \
+            "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION" \
+            "-DCMAKE_CXX_COMPILER=clang++-$PGO_LLVM_VERSION" \
+            "-DCMAKE_EXE_LINKER_FLAGS=-B/usr/lib/llvm-$PGO_LLVM_VERSION/bin -fuse-ld=lld" \
+            "-DCMAKE_C_FLAGS=$profile" "-DCMAKE_CXX_FLAGS=$profile"
+
+      - name: Save CPM downloads
+        if: steps.cpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/cpm
+          key: ${{ steps.cpm-cache.outputs.cache-primary-key }}
+
+      - name: Build eden-cli
+        run: |
+          ccache --zero-stats
+          cmake --build build --target yuzu-cmd --parallel
+          ccache --show-stats
+          test -x build/bin/eden-cli
+          build/bin/eden-cli --version 2>/dev/null | head -1 || true
+
+      - name: Save compiler objects
+        if: always() && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      # linuxdeploy copies eden-cli's libraries into lichii-bc250/usr/lib and points its RPATH
+      # there. The package keeps nx2_switches.txt next to the binary (eden-cli reads it from its
+      # own directory) and the installer files, so the tarball alone is enough to install.
+      - name: Package
+        run: |
+          set -euo pipefail
+          strip build/bin/eden-cli
+          tools="$RUNNER_TEMP/linuxdeploy"
+          mkdir -p "$tools"
+          curl -fsSL -o "$tools/linuxdeploy.AppImage" \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x "$tools/linuxdeploy.AppImage"
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          pkg=lichii-bc250
+          mkdir -p "$pkg/usr/bin"
+          if [ -f build/bin/nx2_switches.txt ]; then cp build/bin/nx2_switches.txt "$pkg/usr/bin/"; fi
+          "$tools/linuxdeploy.AppImage" --appdir "$pkg" --executable build/bin/eden-cli
+          # linuxdeploy also writes an AppDir skeleton (AppRun, .desktop, icons); not needed here.
+          rm -rf "$pkg/AppRun" "$pkg"/*.desktop "$pkg/usr/share/applications" "$pkg/usr/share/icons" "$pkg"/.DirIcon "$pkg"/*.png 2>/dev/null || true
+          ln -s usr/bin/eden-cli "$pkg/eden-cli"
+          mkdir -p "$pkg/tools"
+          cp tools/bc250/bc250-install.sh tools/bc250/bc250-uninstall.sh tools/bc250/add_steam_shortcut.py "$pkg/tools/"
+          cp README.md CHANGELOG.md LICENSE.txt "$pkg/"
+          printf '%s\n%s\n' "$TAG" "$(git rev-parse --short=10 HEAD)" > "$pkg/VERSION"
+          # Every library the binary loads must resolve from the package or the base system.
+          ldd "$pkg/usr/bin/eden-cli" | tee ldd.txt
+          ! grep -q "not found" ldd.txt
+          tar -czf "lichii-bc250-$TAG-linux-x86_64.tar.gz" "$pkg"
+          sha256sum "lichii-bc250-$TAG-linux-x86_64.tar.gz" > "lichii-bc250-$TAG-linux-x86_64.tar.gz.sha256"
+          ls -la lichii-bc250-*
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="Prebuilt eden-cli for the AMD BC-250 (PGO, x86-64), built from $(git rev-parse --short=10 HEAD).
+
+          Install: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/$TAG/tools/bc250/bc250-install.sh | bash\`,
+          or clone the repo and run \`./tools/bc250/bc250-install.sh\`. See the README for the system setup steps.
+          Bring your own game dump, keys and firmware; nothing of the kind is included."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" lichii-bc250-*.tar.gz* --clobber
+          else
+            gh release create "$TAG" lichii-bc250-*.tar.gz* --verify-tag \
+              --title "lichii-bc250 $TAG" --notes "$notes"
+          fi

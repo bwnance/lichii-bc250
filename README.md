@@ -157,23 +157,32 @@ Dump them from your own console, then copy them where the emulator expects them:
 
 ### Step 3: install
 
+Download the prebuilt release (no compiling, a few minutes):
+
 ```sh
 git clone https://github.com/lethevimlet/lichii-bc250.git
 cd lichii-bc250
-./tools/bc250/bc250-install.sh --pgo
+./tools/bc250/bc250-install.sh
 ```
 
-This takes 30-60 minutes the first time (later updates are faster). It:
+It downloads the latest release package from GitHub (built with Lichii's performance profile on
+Ubuntu 24.04; it runs on Bazzite and CachyOS and uses the system's own GPU driver), unpacks it
+to `~/Applications/lichii-bc250/lichii`, and installs the launcher
+`~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250 tuning, plus the game settings
+`~/Applications/lichii-bc250/oot.ini` (frame generation, the presentation queue, the Xbox 360
+controller mapping, and so on). `--release v7` picks a specific release.
 
-1. creates a Fedora 42 container called `lichii-bc250-build` (Bazzite's own system stays
-   untouched) and installs the build tools in it;
-2. with `--pgo`, downloads LLVM 23 once (~2 GB, of which ~600 MB is kept in
-   `~/.local/share/lichii-bc250/llvm23`) and builds with Lichii's performance profile, which is
-   about 10% faster. Leave `--pgo` out to build with the container's own compiler instead;
-3. builds the emulator (`eden-cli`, no desktop GUI);
-4. installs the launcher `~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250
-   tuning, and the game settings `~/Applications/lichii-bc250/oot.ini` (frame generation, the
-   presentation queue, the Xbox 360 controller mapping, and so on).
+**Build it yourself instead** (30-60 minutes the first time, needs `distrobox`):
+
+```sh
+./tools/bc250/bc250-install.sh --build --pgo
+```
+
+This creates a Fedora 42 container called `lichii-bc250-build` (the system itself stays
+untouched), installs the build tools in it, downloads LLVM 23 once with `--pgo` (~2 GB, of which
+~600 MB is kept in `~/.local/share/lichii-bc250/llvm23`) and builds `eden-cli` with Lichii's
+performance profile, which is about 10% faster. Leave `--pgo` out to use the container's own
+compiler.
 
 **Check:** the installer ends with `Installed.` and the launch command.
 
@@ -184,10 +193,10 @@ must be closed for this (it rewrites its shortcut file otherwise): switch to Des
 Steam, then run:
 
 ```sh
-./tools/bc250/bc250-install.sh --pgo --with-shortcut --game "/path/to/your/Ocarina of Time dump"
+./tools/bc250/bc250-install.sh --with-shortcut --game "/path/to/your/Ocarina of Time dump"
 ```
 
-The second run reuses the finished build and only adds the shortcut. Start Steam again: the game
+The second run downloads the package again (or reuses your build with `--build`) and adds the shortcut. Start Steam again: the game
 is in your library under **Non-Steam**.
 
 Without Steam, launch it directly:
@@ -213,11 +222,22 @@ Without Steam, launch it directly:
 ```sh
 cd lichii-bc250
 git pull
-./tools/bc250/bc250-install.sh --pgo
+./tools/bc250/bc250-install.sh            # or: --build --pgo if you build it yourself
 ```
 
 Your `oot.ini` is kept (controls and your own changes), but the installer brings its frame
 generation settings up to date. A Steam shortcut made earlier keeps working.
+
+## Uninstalling
+
+```sh
+./tools/bc250/bc250-uninstall.sh            # launcher, package, Steam shortcut, build container
+./tools/bc250/bc250-uninstall.sh --system   # also reverts the sysctl and zram steps (sudo)
+```
+
+Close Steam first if you want the shortcut removed (Steam rewrites its shortcut file otherwise).
+Your saves, keys, firmware and shader caches in `~/.local/share/eden` are never touched; the disk
+swapfile and kernel arguments are left in place, and the uninstaller prints how to remove them.
 
 ## Settings worth knowing
 
