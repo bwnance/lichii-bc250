@@ -173,6 +173,8 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" lichii-bc250-*.tar.gz* --clobber
           else
-            gh release create "$TAG" lichii-bc250-*.tar.gz* --verify-tag \
+            # A tag with a dash (v7-rc1) is a pre-release: the installer's "latest" skips it.
+            pre=(); case "$TAG" in *-*) pre=(--prerelease) ;; esac
+            gh release create "$TAG" lichii-bc250-*.tar.gz* --verify-tag "${pre[@]}" \
               --title "lichii-bc250 $TAG" --notes "$notes"
           fi
