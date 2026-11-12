@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <algorithm>
 #include <array>
 #include <bitset>
@@ -465,6 +466,35 @@ struct MemoryReserve {
 };
 MemoryReserve g_memory_reserve;
 
+// Device memory traffic per 10 s, logged when there was any: every new block makes the kernel find
+// pages (2 MiB ones first), which on the BC-250 swaps the game out while RAM is free.
+struct MemoryTraffic {
+    std::atomic<u64> allocs{}, alloc_bytes{}, big_allocs{}, frees{}, reused{};
+    std::atomic<u64> alloc_ns{}, worst_ns{};
+    std::atomic<s64> next_log_ns{};
+};
+MemoryTraffic g_memory_traffic;
+
+void NoteMemoryTraffic() {
+    auto& t = g_memory_traffic;
+    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+    s64 next = t.next_log_ns.load(std::memory_order_relaxed);
+    if (now < next || !t.next_log_ns.compare_exchange_strong(next, now + 10'000'000'000LL)) {
+        return;
+    }
+    if (next == 0) {
+        return;
+    }
+    const auto take = [](std::atomic<u64>& v) { return v.exchange(0, std::memory_order_relaxed); };
+    const u64 allocs = take(t.allocs), bytes = take(t.alloc_bytes), big = take(t.big_allocs);
+    const u64 frees = take(t.frees), reused = take(t.reused);
+    const u64 ns = take(t.alloc_ns), worst = take(t.worst_ns);
+    LOG_INFO(Render_Vulkan,
+             "Device memory 10 s: {} new blocks {} MiB ({} >= 8 MiB, {:.1f} ms total, worst {:.1f} "
+             "ms), {} reused from the reserve, {} freed",
+             allocs, bytes >> 20, big, ns / 1e6, worst / 1e6, reused, frees);
+}
+
 /// The key under which an allocation can be reused, or nullopt when its pNext chain asks for
 /// anything else (dedicated, exported, imported memory).
 std::optional<MemoryReserve::Key> ReserveKey(const VkMemoryAllocateInfo& info) {
@@ -503,12 +533,26 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device,
             reserve.entries.erase(it);
             reserve.live.emplace(*memory, *key);
             ++reserve.hits;
+            g_memory_traffic.reused.fetch_add(1, std::memory_order_relaxed);
             return VK_SUCCESS;
         }
     }
     const auto start = std::chrono::steady_clock::now();
     const VkResult result = g_vma_allocate_memory(device, allocate_info, allocator, memory);
     const auto end = std::chrono::steady_clock::now();
+    if (result == VK_SUCCESS) {
+        auto& t = g_memory_traffic;
+        const u64 ns = static_cast<u64>(std::chrono::nanoseconds(end - start).count());
+        t.allocs.fetch_add(1, std::memory_order_relaxed);
+        t.alloc_bytes.fetch_add(allocate_info->allocationSize, std::memory_order_relaxed);
+        t.big_allocs.fetch_add(allocate_info->allocationSize >= (8u << 20) ? 1 : 0,
+                               std::memory_order_relaxed);
+        t.alloc_ns.fetch_add(ns, std::memory_order_relaxed);
+        u64 worst = t.worst_ns.load(std::memory_order_relaxed);
+        while (ns > worst && !t.worst_ns.compare_exchange_weak(worst, ns)) {
+        }
+        NoteMemoryTraffic();
+    }
     std::scoped_lock lock{reserve.mutex};
     if (result == VK_SUCCESS && key) {
         reserve.live.emplace(*memory, *key);
@@ -558,6 +602,10 @@ VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memor
         if (memory == VK_NULL_HANDLE) {
             return;
         }
+    }
+    if (memory != VK_NULL_HANDLE) {
+        g_memory_traffic.frees.fetch_add(1, std::memory_order_relaxed);
+        NoteMemoryTraffic();
     }
     g_vma_free_memory(device, memory, allocator);
 }
