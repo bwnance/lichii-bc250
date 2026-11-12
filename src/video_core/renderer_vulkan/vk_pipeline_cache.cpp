@@ -2235,6 +2235,14 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     return discard ? nullptr : pipeline;
 }
 
+namespace {
+// Phase marks of the pipeline build running on this thread (for the slow-build log line).
+thread_local std::array<std::chrono::steady_clock::time_point, 6> t_build_marks{};
+void MarkBuildPhase(size_t phase) {
+    t_build_marks[phase] = std::chrono::steady_clock::now();
+}
+} // Anonymous namespace
+
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
@@ -2684,14 +2692,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     LOG_ERROR(Render_Vulkan, "{}", exception.what());
     return nullptr;
 }
-
-namespace {
-// Phase marks of the pipeline build running on this thread (for the slow-build log line).
-thread_local std::array<std::chrono::steady_clock::time_point, 6> t_build_marks{};
-void MarkBuildPhase(size_t phase) {
-    t_build_marks[phase] = std::chrono::steady_clock::now();
-}
-} // Anonymous namespace
 
 namespace {
 // Pipelines built on the GPU thread at run time (shader translation, and the SPIR-V unless a worker
