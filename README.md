@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v6
+# lichii-bc250 v7
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -21,9 +21,9 @@ All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; thi
 carries the BC-250-specific changes on top. GPLv3, like upstream. The repository was called
 `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
-**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v6 removes the stutters: new effects
-no longer freeze the picture while their shaders build, and the emulator uses much less memory,
-so the system stops swapping the game out in the middle of play.
+**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v7 shortens the freezes when you enter
+big areas, uses ~400 MB less GPU memory, and ships as a ready-made download: the installer no
+longer has to compile anything (and there is an uninstaller).
 
 ## How it plays
 
