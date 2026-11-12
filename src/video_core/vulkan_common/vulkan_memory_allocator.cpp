@@ -542,7 +542,7 @@ VmaAllocation MemoryAllocator::AllocateSparseMemory(const VkMemoryRequirements &
     // In a pool of their own (see Device::SeparatePool); anything over half a block, or a pool
     // allocation that fails, takes the default blocks.
     u32 memory_type{};
-    if (requirements.size <= Device::SeparatePoolBlockSize / 2 &&
+    if (requirements.size <= Device::SeparatePoolBlockSize() / 2 &&
         vmaFindMemoryTypeIndex(allocator, requirements.memoryTypeBits, &alloc_ci, &memory_type) ==
             VK_SUCCESS) {
         if (const VmaPool pool =
@@ -577,7 +577,7 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
                                                  VmaAllocationInfo& alloc_info) const {
     // The buffer cache's buffers, churned by its collector: in a pool of their own (see
     // Device::SeparatePool). Anything over half a block takes the default blocks (dedicated).
-    if (usage != MemoryUsage::DeviceLocal || ci.size > Device::SeparatePoolBlockSize / 2) {
+    if (usage != MemoryUsage::DeviceLocal || ci.size > Device::SeparatePoolBlockSize() / 2) {
         return false;
     }
     u32 memory_type{};

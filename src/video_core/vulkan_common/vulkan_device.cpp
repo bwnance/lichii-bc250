@@ -1097,7 +1097,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             // after ten minutes, with 32 MiB ones ~0.5 GB: a block drains only once all of its
             // images are gone, and fewer per block drain sooner. VMA gives allocations over half a
             // block (8 MiB) their own memory, which goes back to the driver when they are freed.
-            .preferredLargeHeapBlockSize = 16u * 1024u * 1024u,
+            .preferredLargeHeapBlockSize = SeparatePoolBlockSize(),
             .pAllocationCallbacks = nullptr,
             .pDeviceMemoryCallbacks = nullptr,
             .pHeapSizeLimit = heap_size_limit != 0 ? heap_size_limits.data() : nullptr,
@@ -1136,6 +1136,19 @@ Device::~Device() {
     ReleaseMemoryReserve(*logical);
 }
 
+VkDeviceSize Device::SeparatePoolBlockSize() {
+    static const VkDeviceSize size = [] {
+        const char* value = std::getenv("EDEN_NX2_VMA_BLOCK_MIB");
+        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+        if (mib >= 1 && mib <= 256) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_VMA_BLOCK_MIB: {} MiB device memory blocks", mib);
+            return VkDeviceSize{mib} << 20;
+        }
+        return VkDeviceSize{16} << 20;
+    }();
+    return size;
+}
+
 VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
     std::scoped_lock lk{separate_pools_mutex};
     VmaPool& pool = separate_pools[static_cast<u32>(kind)][memory_type];
@@ -1143,7 +1156,7 @@ VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
         const VmaPoolCreateInfo ci{
             .memoryTypeIndex = memory_type,
             .flags = 0,
-            .blockSize = SeparatePoolBlockSize,
+            .blockSize = SeparatePoolBlockSize(),
             .minBlockCount = 0,
             .maxBlockCount = 0,
             .priority = 0.f,

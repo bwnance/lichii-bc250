@@ -283,7 +283,9 @@ public:
         SparsePages,
         DeviceBuffers,
     };
-    static constexpr VkDeviceSize SeparatePoolBlockSize = 16ULL << 20;
+    /// VMA block size for the default blocks and the separate pools: 16 MiB, or
+    /// EDEN_NX2_VMA_BLOCK_MIB (1-256). Allocations over half a block get memory of their own.
+    static VkDeviceSize SeparatePoolBlockSize();
 
     /// The pool of that kind for a memory type, created on first use (null if that failed).
     VmaPool GetSeparatePool(SeparatePool kind, u32 memory_type) const;
