@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string>
+#include <map>
 #include <atomic>
 #include <algorithm>
 #include <array>
@@ -474,6 +476,9 @@ struct MemoryTraffic {
     std::atomic<s64> next_log_ns{};
 };
 MemoryTraffic g_memory_traffic;
+/// The sizes of new dedicated blocks in the window, by kind (image or buffer), for the log.
+std::mutex g_traffic_sizes_mutex;
+std::map<std::pair<char, u64>, u64> g_traffic_sizes;
 
 void NoteMemoryTraffic() {
     auto& t = g_memory_traffic;
@@ -489,6 +494,21 @@ void NoteMemoryTraffic() {
     const u64 allocs = take(t.allocs), bytes = take(t.alloc_bytes), big = take(t.big_allocs);
     const u64 frees = take(t.frees), reused = take(t.reused);
     const u64 ns = take(t.alloc_ns), worst = take(t.worst_ns);
+    std::string sizes;
+    {
+        std::scoped_lock lock{g_traffic_sizes_mutex};
+        std::vector<std::pair<u64, std::pair<char, u64>>> order;
+        for (const auto& [key, count] : g_traffic_sizes) {
+            order.emplace_back(count, key);
+        }
+        std::ranges::sort(order, std::greater{});
+        for (size_t i = 0; i < order.size() && i < 8; ++i) {
+            sizes += fmt::format(" {}x{} {}KiB", order[i].first, order[i].second.first,
+                                 order[i].second.second >> 10);
+        }
+        g_traffic_sizes.clear();
+    }
+    LOG_INFO(Render_Vulkan, "Device memory 10 s sizes (count x image/buffer/shared size):{}", sizes);
     LOG_INFO(Render_Vulkan,
              "Device memory 10 s: {} new blocks {} MiB ({} >= 8 MiB, {:.1f} ms total, worst {:.1f} "
              "ms), {} reused from the reserve, {} freed",
@@ -550,6 +570,18 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device,
         t.alloc_ns.fetch_add(ns, std::memory_order_relaxed);
         u64 worst = t.worst_ns.load(std::memory_order_relaxed);
         while (ns > worst && !t.worst_ns.compare_exchange_weak(worst, ns)) {
+        }
+        char kind = 's';
+        for (auto* next = static_cast<const VkBaseInStructure*>(allocate_info->pNext);
+             next != nullptr; next = next->pNext) {
+            if (next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO) {
+                const auto* dedicated = reinterpret_cast<const VkMemoryDedicatedAllocateInfo*>(next);
+                kind = dedicated->image != VK_NULL_HANDLE ? 'i' : 'b';
+            }
+        }
+        {
+            std::scoped_lock sizes_lock{g_traffic_sizes_mutex};
+            ++g_traffic_sizes[{kind, allocate_info->allocationSize}];
         }
         NoteMemoryTraffic();
     }
