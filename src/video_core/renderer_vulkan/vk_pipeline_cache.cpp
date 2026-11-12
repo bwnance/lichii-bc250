@@ -472,9 +472,21 @@ struct DeferredStages {
     std::array<std::vector<u32>, Maxwell::MaxShaderStage> reference_spirv;
 };
 
+// EDEN_NX2_PIPELINE_WORKERS=<n>: at most n shader translation workers (default: all CPU threads
+// but one). Each holds its own IR pools and the driver its own compiler state, so on first visits
+// to a large area (Ocarina's Hyrule Field: ~250 pipelines) 15 workers plus 8 driver threads took
+// 3.7 GB at once on the 16 GB BC-250 and swapped the game out for 9 s.
+size_t ConfiguredPipelineWorkers(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t{0};
+}
+
 size_t GetTotalPipelineWorkers() {
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
+    if (const size_t configured = ConfiguredPipelineWorkers("EDEN_NX2_PIPELINE_WORKERS")) {
+        return std::min(configured, max_core_threads);
+    }
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
@@ -744,10 +756,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.SupportsTransformFeedbackProvokingVertexPreservation();
 
     const size_t cpu_threads = GetTotalPipelineWorkers();
+    // EDEN_NX2_PIPELINE_DRIVER_THREADS=<n>: at most n concurrent driver pipeline builds.
+    const size_t driver_cap = ConfiguredPipelineWorkers("EDEN_NX2_PIPELINE_DRIVER_THREADS");
     const size_t driver_threads =
         device.HasBrokenParallelShaderCompiling()
             ? 1
-            : std::min(cpu_threads, std::max<size_t>(std::thread::hardware_concurrency() / 2, 2));
+            : std::min({cpu_threads, std::max<size_t>(std::thread::hardware_concurrency() / 2, 2),
+                        driver_cap != 0 ? driver_cap : ~size_t{0}});
     shader_jobs.emplace(VideoCommon::ShaderJobConfig{
         .cpu_threads = cpu_threads,
         .driver_threads = driver_threads,
