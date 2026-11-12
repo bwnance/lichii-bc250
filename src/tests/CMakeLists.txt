@@ -13,13 +13,20 @@ add_executable(tests
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
     video_core/nx2_stutter_trace.cpp
+    video_core/back_idle_trace.cpp
+    video_core/list_macro_trace.cpp
     video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
     video_core/semaphore_waiters.cpp
+    video_core/hdr_output.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
+    core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
     core/nx2_present_pacer.cpp
+    core/ldn_lan_protocol.cpp
+    core/perf_stats.cpp
+    common/display_hdr.cpp
     common/dkb_cpu_trace.cpp
     common/dkb_frame_trace.cpp
     audio_core/nx2_sysmix.cpp
@@ -74,6 +81,7 @@ add_executable(tests
     video_core/framebuffer_clear_layers.cpp
     video_core/framebuffer_limits.cpp
     video_core/unbacked_fallback.cpp
+    video_core/eviction_age.cpp
     video_core/host_memory_limit.cpp
     video_core/fire_emblem_upscale.cpp
     video_core/dlss_contract.cpp
@@ -82,6 +90,8 @@ add_executable(tests
     video_core/ampere_async_copy.cpp
     video_core/ampere_trap_guards.cpp
     video_core/async_draw_policy.cpp
+    video_core/bounded_store.cpp
+    video_core/pipeline_eviction_policy.cpp
     video_core/async_shader_emission.cpp
     video_core/oot_network.cpp
     video_core/page_filter.cpp
@@ -158,9 +168,12 @@ add_executable(tests
     common/host_memory_test_access.h
     common/memory_detect.cpp
     core/host_memory_failure.cpp
+    common/memory_detect.cpp
     common/multi_level_page_table.cpp
+    common/nextendo.cpp
     common/page_table.cpp
     common/param_package.cpp
+    common/poll_window.cpp
     common/range_map.cpp
     common/ring_buffer.cpp
     common/scratch_buffer.cpp
@@ -170,6 +183,7 @@ add_executable(tests
     common/unique_function.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
+    core/nextendo_redirect.cpp
     core/thread_startup_policy.cpp
     core/nup_writer.cpp
     core/nup_metadata.cpp
@@ -247,6 +261,7 @@ if (TARGET SDL3::SDL3)
 endif()
 
 if (WIN32 AND ARCHITECTURE_x86_64)
+    target_sources(tests PRIVATE common/nx2_sampler.cpp)
     add_executable(event_wait_probe ../../tools/nx2/event_wait_probe.cpp)
     target_link_libraries(event_wait_probe PRIVATE common)
 endif()

@@ -4,6 +4,38 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v7 — 2026-11-12: shorter freezes in big areas, prebuilt releases
+
+- **Prebuilt releases.** Pushing a `v*` tag builds the PGO emulator on GitHub (Ubuntu 24.04,
+  libraries bundled, the system's own Vulkan loader and GPU driver) and publishes it as a
+  release. `bc250-install.sh` now downloads the latest release instead of compiling
+  (`--release <tag>` for a specific one, `--build [--pgo]` still builds from source), and the
+  launcher runs it directly on the system, without a container. New `bc250-uninstall.sh`
+  removes everything the installer added (`--system` also reverts the sysctl and zram steps);
+  saves, keys and firmware are never touched.
+- **GPU memory in 8 MiB blocks instead of 16** (`EDEN_NX2_VMA_BLOCK_MIB`): the 16 MiB blocks were
+  ~19 % empty (464 MiB at the Castle Town peak). With 8 MiB only 22-34 MiB is unused and the GPU
+  memory peak is ~400 MB lower; castle route 53.4-55.1 fps (was 53.0-54.4). 4 MiB was slower.
+- **Lichii nx2 build 160 merged** (35 commits past what v6 had, incl. #1336/#1337 kept pipelines
+  and SPIR-V, #1335, HDR and UI). Kept ours where they overlap: JIT warm-up, frames ahead 2,
+  background translation, heap trims, the texture cache's 300-frame minimum age.
+- **New system setting: `vm.watermark_scale_factor=1000`** (README, step 1.4). Entering Hyrule Castle
+  Town the first time froze the game for 10-14 s (six runs): the area needs ~3 GB of GPU memory in
+  30 s, and each of ~140 allocations waited while the kernel compressed other memory into swap
+  (10.7-13 s of allocation time). With the kernel keeping ~1.5 GB free ahead of time the entry
+  freezes for 2-3 s, and the rest of the castle route has no pause over 0.15 s (before: up to
+  4.5 s). Hyrule Field loop: 58.4 screen fps, 4 repeated frames/s (before 57-58 fps, 8-12/s).
+  2000 was worse (more swapping in play).
+- **zram three quarters of RAM** (README, step 1.5; 7.4 -> 11 GB here). A 10-minute session in
+  Castle Town filled the old zram, the kernel moved on to the disk swapfile and the game froze for
+  up to 27 s.
+- **Lichii PR #1373 ported** (MWAITX idle wait for guest cores): within noise on the BC-250
+  (Hyrule Field walk 28.9 -> 29.0 game fps), kept because it matches upstream.
+- Measured and not adopted: GPU clock held at 2000 MHz (+0.3-0.8 game fps, inconclusive over
+  5-minute runs), Unsafe CPU accuracy, per-physical-core pinning, a 60 Hz guest vsync, a smaller
+  texture cache or ASTC decode cap for the castle load (no change), and suspending the texture
+  cache's keep-recent protection under memory pressure (smaller cache, no smoother play).
+
 ### v6 — 2026-11-12: stutters gone (memory and shader builds)
 
 Monitored play (Deku Tree, Hyrule Field, combat) showed the remaining drops were the 16 GB

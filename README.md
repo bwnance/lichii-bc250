@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v6
+# lichii-bc250 v7
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -21,9 +21,9 @@ All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; thi
 carries the BC-250-specific changes on top. GPLv3, like upstream. The repository was called
 `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
-**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v6 removes the stutters: new effects
-no longer freeze the picture while their shaders build, and the emulator uses much less memory,
-so the system stops swapping the game out in the middle of play.
+**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v7 shortens the freezes when you enter
+big areas, uses ~400 MB less GPU memory, and ships as a ready-made download: the installer no
+longer has to compile anything (and there is an uninstaller).
 
 ## How it plays
 
@@ -35,7 +35,8 @@ Field and in automated loops:
   reads as slight unevenness rather than stutter.
 - **No more long hitches in play** (v6): the worst pause after loading went from 1-2.6 s to about
   0.15 s. New effects can appear a frame or two late the first time they show up in a session.
-- **Loading an area** can still pause for about a second.
+- **Loading an area** can still pause for about a second; the first visit to a big area (Castle Town)
+  for 2-3 s.
 - **The very first boot** of the game shows a black screen for 3-5 minutes (see step 5).
 
 ## Setup in five steps
@@ -92,10 +93,25 @@ and survive its updates.
 
    **Check:** `cat /proc/sys/vm/compaction_proactiveness` shows `100`, also after a reboot.
 
-4. **Compressed swap in RAM with zstd, plus a disk swapfile.** The BC250 Toolkit sets up zswap
+4. **Keep 1.5 GB of RAM free ahead of time: watermark scale factor 1000.** A big area load needs
+   gigabytes of GPU memory at once (Ocarina's Castle Town: about 3 GB in 30 s). With the kernel's
+   default (125) it keeps only ~190 MB free, so every one of those allocations waits while the
+   kernel compresses other memory into swap: a 10-14 s freeze on the first visit. With 1000 the
+   kernel's background thread keeps ~1.5 GB free, and the same entry freezes for 2-3 s:
+
+   ```sh
+   printf 'vm.watermark_scale_factor = 1000\n' > /tmp/watermark.conf
+   sudo install -m 644 /tmp/watermark.conf /etc/sysctl.d/99-bc250-watermark.conf
+   sudo sysctl --system
+   ```
+
+   **Check:** `cat /proc/sys/vm/watermark_scale_factor` shows `1000`, also after a reboot.
+
+5. **Compressed swap in RAM with zstd, plus a disk swapfile.** The BC250 Toolkit sets up zswap
    (a compressed cache in RAM in front of a 16 GB swapfile) but chooses `lz4`, which only fits
    ~1.75:1; `zstd` fits ~2-3:1, so more of the swapped game stays in RAM instead of being read
-   back from disk. The CachyOS kernel has zstd built in; switch it now and on the kernel command
+   back from disk (reading it back from disk froze the game for up to 27 s in long Castle Town
+   sessions). The CachyOS kernel has zstd built in; switch it now and on the kernel command
    line (Limine; `limine-update` also re-enrolls the boot config's checksum):
 
    ```sh
@@ -107,7 +123,7 @@ and survive its updates.
    **Check:** `cat /sys/module/zswap/parameters/compressor` shows `zstd`, and `swapon --show`
    lists the swapfile.
 
-5. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
+6. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
    area load, under the kernel's default limit (half of RAM) but not by much:
 
    ```sh
@@ -119,7 +135,7 @@ and survive its updates.
 
    **Check:** `cat /proc/cmdline` contains `ttm.pages_limit=3145728`.
 
-6. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
+7. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
    console uses these (set with the BC-250 community tools and the image's
    `cyan-skillfish-governor-smu` config). They help a little; the steps above matter more.
    2000 MHz is above the image's default of 1850: watch your temperatures.
@@ -132,11 +148,11 @@ and survive its updates.
    **Check:** `nproc` shows `16` with all 8 cores, and the GPU temperature
    (`/sys/class/drm/card*/device/hwmon/hwmon*/temp1_input`) is not `0`.
 
-7. **If you use the toolkit's Mesa build:** it advertises `VK_EXT_mesh_shader` on the BC-250,
+8. **If you use the toolkit's Mesa build:** it advertises `VK_EXT_mesh_shader` on the BC-250,
    which has no mesh hardware; native task/mesh draws then render white. The installer's
    launcher sets `EDEN_NX2_FORCE_MESH_FALLBACK=1`, which keeps the emulator's own fallback.
 
-8. **Bluetooth Xbox One S-style pads (including 8BitDo adapters in X-input mode):** Steam's
+9. **Bluetooth Xbox One S-style pads (including 8BitDo adapters in X-input mode):** Steam's
    udev rules leave out their hidraw node (045E:02E0), so under Steam Input the buttons work but
    the sticks don't. The installer adds a rule for it.
 
@@ -151,24 +167,34 @@ Dump them from your own console, then copy them where the emulator expects them:
 
 ### Step 3: install
 
+Download the prebuilt release (no compiling, a few minutes):
+
 ```sh
 git clone https://github.com/bwnance/lichii-bc250.git
 cd lichii-bc250
-./tools/bc250/bc250-install.sh --pgo
+./tools/bc250/bc250-install.sh
 ```
 
-This takes 30-60 minutes the first time (later updates are faster). It:
+It downloads the latest release package from GitHub (built with Lichii's performance profile on
+Ubuntu 24.04; it runs on CachyOS and Bazzite and uses the system's own GPU driver), unpacks it
+to `~/Applications/lichii-bc250/lichii`, and installs the launcher
+`~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250 tuning, plus the game settings
+`~/Applications/lichii-bc250/oot.ini` (frame generation, the presentation queue, the Xbox 360
+controller mapping, and so on). `--release v7` picks a specific release.
 
-1. installs the build tools with pacman (asks for sudo once) and the controller udev rule
-   from step 1;
-2. with `--pgo`, builds with Lichii's performance profile, about 10% faster. CachyOS's own
-   LLVM (clang 22 or newer, installed in step 1) reads the profile; with an older clang the
-   installer downloads LLVM 23 once (~2 GB, ~600 MB kept in `~/.local/share/lichii-bc250/llvm23`).
-   Leave `--pgo` out to build with the system's clang and no profile;
-3. builds the emulator (`eden-cli`, no desktop GUI);
-4. installs the launcher `~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250
-   tuning, and the game settings `~/Applications/lichii-bc250/oot.ini` (frame generation, the
-   presentation queue, the Xbox 360 controller mapping, and so on).
+**Build it yourself instead** (30-60 minutes the first time):
+
+```sh
+./tools/bc250/bc250-install.sh --build --pgo
+```
+
+This installs the build tools with pacman (asks for sudo once) and builds `eden-cli` on the
+system itself with Lichii's performance profile, about 10% faster. CachyOS's own LLVM (clang 22
+or newer) reads the profile; with an older clang the installer downloads LLVM 23 once (~2 GB,
+~600 MB kept in `~/.local/share/lichii-bc250/llvm23`). Leave `--pgo` out to build with the
+system's clang and no profile.
+
+Either way the installer also adds the controller udev rule from step 1.
 
 **Check:** the installer ends with `Installed.` and the launch command.
 
@@ -179,10 +205,10 @@ must be closed for this (it rewrites its shortcut file otherwise): switch to Des
 Steam, then run:
 
 ```sh
-./tools/bc250/bc250-install.sh --pgo --with-shortcut --game "/path/to/your/Ocarina of Time dump"
+./tools/bc250/bc250-install.sh --with-shortcut --game "/path/to/your/Ocarina of Time dump"
 ```
 
-The second run reuses the finished build and only adds the shortcut. Start Steam again: the game
+The second run downloads the package again (or reuses your build with `--build`) and adds the shortcut. Start Steam again: the game
 is in your library under **Non-Steam**.
 
 Without Steam, launch it directly:
@@ -208,11 +234,22 @@ Without Steam, launch it directly:
 ```sh
 cd lichii-bc250
 git pull
-./tools/bc250/bc250-install.sh --pgo
+./tools/bc250/bc250-install.sh            # or: --build --pgo if you build it yourself
 ```
 
 Your `oot.ini` is kept (controls and your own changes), but the installer brings its frame
 generation settings up to date. A Steam shortcut made earlier keeps working.
+
+## Uninstalling
+
+```sh
+./tools/bc250/bc250-uninstall.sh            # launcher, package, Steam shortcut, build container
+./tools/bc250/bc250-uninstall.sh --system   # also reverts the sysctl and zram steps (sudo)
+```
+
+Close Steam first if you want the shortcut removed (Steam rewrites its shortcut file otherwise).
+Your saves, keys, firmware and shader caches in `~/.local/share/eden` are never touched; the disk
+swapfile and kernel arguments are left in place, and the uninstaller prints how to remove them.
 
 ## Settings worth knowing
 
@@ -243,7 +280,7 @@ The numbers above were measured on this setup (step 1 with all the optional item
 |---|---|
 | OS | Bazzite (62fixolab BC-250 image), Gaming Mode at 1920x1080 |
 | Memory | 16 GB total, UMA carve-out 512 MB (~15.2 GB system RAM) |
-| Swap | zram (zstd) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100` |
+| Swap | zram (zstd, 3/4 of RAM) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100`, `vm.watermark_scale_factor=1000` |
 | CPU | 8 cores / 16 threads (stock boots with 6 cores) |
 | GPU | 40 compute units, governor 500-2000 MHz |
 | GPU memory limit | `ttm.pages_limit=3145728` (12 GB) |

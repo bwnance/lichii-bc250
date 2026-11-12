@@ -765,6 +765,22 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         first_next = &diagnostics_nv;
     }
 
+    // AMD's driver fails device-local allocations once the heap is full unless overallocation is
+    // allowed, which lets them fall back to system memory.
+    VkDeviceMemoryOverallocationCreateInfoAMD overallocation_amd{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_OVERALLOCATION_CREATE_INFO_AMD,
+        .pNext = first_next,
+        .overallocationBehavior = VK_MEMORY_OVERALLOCATION_BEHAVIOR_ALLOWED_AMD,
+    };
+    if (is_amd_driver &&
+        supported_extensions.contains(VK_AMD_MEMORY_OVERALLOCATION_BEHAVIOR_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_AMD_MEMORY_OVERALLOCATION_BEHAVIOR_EXTENSION_NAME);
+        first_next = &overallocation_amd;
+        LOG_INFO(Render_Vulkan,
+                 "VK_AMD_memory_overallocation_behavior enabled: device memory may overflow into "
+                 "system memory");
+    }
+
     is_blit_depth24_stencil8_supported = TestDepthStencilBlits(VK_FORMAT_D24_UNORM_S8_UINT);
     is_blit_depth32_stencil8_supported = TestDepthStencilBlits(VK_FORMAT_D32_SFLOAT_S8_UINT);
     is_optimal_astc_supported = ComputeIsOptimalAstcSupported();
@@ -1074,14 +1090,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             .flags = flags,
             .physicalDevice = physical,
             .device = *logical,
-            // 16 MiB blocks on discrete GPUs too: with 256 MiB ones, Switch 2 titles' mix of
-            // texture sizes left ~38% of the image blocks empty (2 GB of an 8 GB card in title
-            // 1), which the texture cache counted as used and kept evicting textures for. With
-            // 64 MiB ones textures created and deleted by the thousand still left ~1.7 GB of holes
-            // after ten minutes, with 32 MiB ones ~0.5 GB: a block drains only once all of its
-            // images are gone, and fewer per block drain sooner. VMA gives allocations over half a
-            // block (8 MiB) their own memory, which goes back to the driver when they are freed.
-            .preferredLargeHeapBlockSize = 16u * 1024u * 1024u,
+            // Small blocks on discrete GPUs too (SeparatePoolBlockSize, 8 MiB): with 256 MiB ones,
+            // Switch 2 titles' mix of texture sizes left ~38% of the image blocks empty (2 GB of an
+            // 8 GB card in title 1), which the texture cache counted as used and kept evicting
+            // textures for. With 64 MiB ones textures created and deleted by the thousand still
+            // left ~1.7 GB of holes after ten minutes, with 32 MiB ones ~0.5 GB, with 16 MiB ones
+            // 464 MiB (BC-250, Castle Town), with 8 MiB ones 22 MiB: a block drains only once all
+            // of its images are gone, and fewer per block drain sooner. VMA gives allocations over
+            // half a block their own memory, which goes back to the driver when they are freed.
+            .preferredLargeHeapBlockSize = SeparatePoolBlockSize(),
             .pAllocationCallbacks = nullptr,
             .pDeviceMemoryCallbacks = nullptr,
             .pHeapSizeLimit = heap_size_limit != 0 ? heap_size_limits.data() : nullptr,
@@ -1120,6 +1137,23 @@ Device::~Device() {
     ReleaseMemoryReserve(*logical);
 }
 
+VkDeviceSize Device::SeparatePoolBlockSize() {
+    static const VkDeviceSize size = [] {
+        const char* value = std::getenv("EDEN_NX2_VMA_BLOCK_MIB");
+        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+        if (mib >= 1 && mib <= 256) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_VMA_BLOCK_MIB: {} MiB device memory blocks", mib);
+            return VkDeviceSize{mib} << 20;
+        }
+        // 8 MiB: Ocarina's Castle Town on the BC-250 left 464 MiB free inside 16 MiB blocks (19%)
+        // and 22 MiB inside 8 MiB ones; device memory in use at the peak 5453 -> 5056 MiB, the
+        // castle route 54.4 -> 55.0-55.1 screen fps. 4 MiB saved nothing more and was slower
+        // (more allocations of their own: 47.7 fps).
+        return VkDeviceSize{8} << 20;
+    }();
+    return size;
+}
+
 VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
     std::scoped_lock lk{separate_pools_mutex};
     VmaPool& pool = separate_pools[static_cast<u32>(kind)][memory_type];
@@ -1127,7 +1161,7 @@ VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
         const VmaPoolCreateInfo ci{
             .memoryTypeIndex = memory_type,
             .flags = 0,
-            .blockSize = SeparatePoolBlockSize,
+            .blockSize = SeparatePoolBlockSize(),
             .minBlockCount = 0,
             .maxBlockCount = 0,
             .priority = 0.f,

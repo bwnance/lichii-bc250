@@ -1,17 +1,22 @@
 #!/bin/bash
 # lichii-bc250 installer for the AMD BC-250 console (CachyOS).
 #
-# Usage:  ./tools/bc250/bc250-install.sh [--pgo] [--with-shortcut] [--game <path>]
+# Usage:  ./tools/bc250/bc250-install.sh [--release <tag>] [--build [--pgo]] [--with-shortcut] [--game <path>]
 #
-#   --pgo            build with the bundled Lichii profile (~10% more fps) using the system LLVM
-#                    (clang 22+); with an older one, downloads LLVM 23 (~2 GB, keeps ~600 MB)
+#   (default)        download the prebuilt package of the latest GitHub release (PGO build, ~100 MB)
+#                    into ~/Applications/lichii-bc250/lichii; nothing is compiled
+#   --release <tag>  download that release instead of the latest (e.g. --release v7)
+#   --build          compile eden-cli from this checkout on the host instead (30-60 min)
+#   --pgo            with --build: use the bundled Lichii profile (~10% more fps) and the system
+#                    LLVM (clang 22+); with an older one, downloads LLVM 23 (~2 GB, keeps ~600 MB)
 #   --with-shortcut  add a Steam non-Steam shortcut (needs --game and Steam stopped)
 #   --game <path>    your own Ocarina of Time dump, for the shortcut
 #
 # What it does:
-#   1. Installs the build dependencies on the host with pacman (asks for sudo once), and a
-#      udev rule so Steam Input can read Xbox One S-style Bluetooth pads' sticks.
-#   2. Builds the eden-cli binary from this checkout (Release, clang, no Qt; PGO with --pgo).
+#   1. Adds a udev rule so Steam Input can read Xbox One S-style Bluetooth pads' sticks.
+#   2. Downloads and unpacks the release package (default), or with --build installs the build
+#      dependencies with pacman and builds eden-cli from this checkout (Release, clang, no Qt;
+#      PGO with --pgo).
 #   3. Installs the launch wrapper with the BC-250 tuning and the per-game config template.
 #   4. Optionally registers a Steam non-Steam shortcut for your Ocarina of Time dump
 #      (requires Steam to be stopped; the installer tells you when).
@@ -27,15 +32,20 @@ INSTALL_USER="${SUDO_USER:-$USER}"
 
 WITH_SHORTCUT=0
 WITH_PGO=0
+WITH_BUILD=0
+RELEASE_TAG=""
+GITHUB_REPO=lethevimlet/lichii-bc250
 LLVM_VERSION=23.1.5
 LLVM_DIR="$HOME/.local/share/lichii-bc250/llvm23"
 GAME_PATH=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --with-shortcut) WITH_SHORTCUT=1 ;;
-        --pgo) WITH_PGO=1 ;;
+        --pgo) WITH_PGO=1; WITH_BUILD=1 ;;
+        --build) WITH_BUILD=1 ;;
+        --release) shift; [ $# -gt 0 ] || { echo "--release needs a tag"; exit 1; }; RELEASE_TAG="$1" ;;
         --game) shift; [ $# -gt 0 ] || { echo "--game needs a path"; exit 1; }; GAME_PATH="$1" ;;
-        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -51,28 +61,7 @@ if [ "$(id -u)" = 0 ]; then
     exit 1
 fi
 
-if ! command -v pacman >/dev/null; then
-    echo "pacman not found: this installer targets CachyOS (or another Arch-based distro)." >&2
-    exit 1
-fi
-
-# --- 1. Build dependencies ----------------------------------------------------
-DEPS=(
-    base-devel git curl autoconf cmake ninja pkgconf clang llvm lld nasm patch make jq
-    fmt glslang spirv-tools hidapi nlohmann-json libtool libusb zstd lz4 openssl
-    libpulse speexdsp wayland zlib ffmpeg libxext boost sdl3
-)
-# pacman -T prints the entries that are not satisfied (and nothing when all are).
-MISSING=$(pacman -T "${DEPS[@]}" || true)
-if [ -n "$MISSING" ]; then
-    log "installing build dependencies: $(echo $MISSING)"
-    # shellcheck disable=SC2086
-    sudo pacman -S --needed --noconfirm $MISSING
-else
-    log "dependencies already installed"
-fi
-
-# --- 1b. Controller access for Steam Input -----------------------------------
+# --- 1. Controller access for Steam Input -----------------------------------
 # Steam's own udev rules (steam-devices) give the desktop user the hidraw node of most
 # Bluetooth pads, but not the Xbox One S over Bluetooth (045E:02E0), which 8BitDo adapters
 # and pads in X-input mode also report. Without it Steam falls back to evdev for that pad
@@ -88,7 +77,67 @@ else
     log "controller udev rule already present"
 fi
 
-# --- 2. Build ----------------------------------------------------------------
+# --- 2. Prebuilt release (default) -------------------------------------------
+if [ "$WITH_BUILD" = 0 ]; then
+    for t in curl tar sha256sum python3; do
+        command -v "$t" >/dev/null || { echo "$t not found; install it or use --build" >&2; exit 1; }
+    done
+    if [ -n "$RELEASE_TAG" ]; then api="https://api.github.com/repos/$GITHUB_REPO/releases/tags/$RELEASE_TAG"
+    else api="https://api.github.com/repos/$GITHUB_REPO/releases/latest"; fi
+    log "looking up the ${RELEASE_TAG:-latest} release of $GITHUB_REPO"
+    urls=$(curl -fsSL "$api" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+a = {x["name"]: x["browser_download_url"] for x in r.get("assets", [])}
+tgz = [n for n in a if n.endswith("-linux-x86_64.tar.gz")]
+if not tgz: sys.exit(1)
+print(r["tag_name"], a[tgz[0]], a.get(tgz[0] + ".sha256", ""))
+') || { echo "no release package found (use --build to compile from source)" >&2; exit 1; }
+    read -r TAG URL SUMURL <<<"$urls"
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    log "downloading $TAG"
+    curl -fL --progress-bar -o "$tmp/pkg.tar.gz" "$URL"
+    if [ -n "$SUMURL" ]; then
+        want=$(curl -fsSL "$SUMURL" | awk '{print $1}')
+        have=$(sha256sum "$tmp/pkg.tar.gz" | awk '{print $1}')
+        [ "$want" = "$have" ] || { echo "checksum mismatch for the download" >&2; exit 1; }
+    fi
+    tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
+    [ -x "$tmp/lichii-bc250/eden-cli" ] || { echo "the package has no eden-cli" >&2; exit 1; }
+    mkdir -p "$APP_DIR"
+    rm -rf "$APP_DIR/lichii.old"
+    [ -d "$APP_DIR/lichii" ] && mv "$APP_DIR/lichii" "$APP_DIR/lichii.old"
+    mv "$tmp/lichii-bc250" "$APP_DIR/lichii"
+    rm -rf "$APP_DIR/lichii.old"
+    EDEN_EXEC="$APP_DIR/lichii/eden-cli"
+    # A piped install (curl | bash) has no checkout; the package carries the helper scripts.
+    REPO_DIR_TOOLS="$APP_DIR/lichii/tools"
+    log "installed $TAG to $APP_DIR/lichii"
+else
+REPO_DIR_TOOLS="$REPO_DIR/tools/bc250"
+
+if ! command -v pacman >/dev/null; then
+    echo "pacman not found: --build targets CachyOS (or another Arch-based distro)." >&2
+    exit 1
+fi
+
+# --- 2. Build dependencies and build -------------------------------------------
+DEPS=(
+    base-devel git curl autoconf cmake ninja pkgconf clang llvm lld nasm patch make jq
+    fmt glslang spirv-tools hidapi nlohmann-json libtool libusb zstd lz4 openssl
+    libpulse speexdsp wayland zlib ffmpeg libxext boost sdl3
+)
+# pacman -T prints the entries that are not satisfied (and nothing when all are).
+MISSING=$(pacman -T "${DEPS[@]}" || true)
+if [ -n "$MISSING" ]; then
+    log "installing build dependencies: $(echo $MISSING)"
+    # shellcheck disable=SC2086
+    sudo pacman -S --needed --noconfirm $MISSING
+else
+    log "dependencies already installed"
+fi
+
 cd "$REPO_DIR"
 CMAKE_ARGS=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DYUZU_CMD=ON
             -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF
@@ -145,6 +194,8 @@ fi
 cmake --build "$BUILD_DIR" --target eden-cli --parallel 4
 [ -x "$BUILD_DIR/bin/eden-cli" ] || { echo "build failed: no eden-cli" >&2; exit 1; }
 log "built $BUILD_DIR/bin/eden-cli"
+EDEN_EXEC="$BUILD_DIR/bin/eden-cli"
+fi
 
 # --- 3. Wrapper and config ----------------------------------------------------
 log "installing the launch wrapper to $APP_DIR"
@@ -155,6 +206,7 @@ cat > "$APP_DIR/lichii-bc250" <<'WRAP'
 # lichii-bc250 launcher: tunes the emulator for the BC-250 iGPU, then runs eden-cli.
 # Usage: lichii-bc250 [-f] -g "<path to your game dump>"
 set -euo pipefail
+EDEN_EXEC="__EDEN_EXEC__"
 unset LD_PRELOAD
 # The BC-250 iGPU (RADV) with UMA: cap the texture cache so it never tramples
 # the 15 GB of system RAM the game and the compositor also live in. 1.5/2 GB (v6) left
@@ -176,9 +228,9 @@ export EDEN_NX2_PIPELINE_WORKERS=4 EDEN_NX2_PIPELINE_DRIVER_THREADS=2 EDEN_NX2_I
 # advertise VK_EXT_mesh_shader anyway; native task/mesh draws then render white. Keep the
 # emulator's own compute fallback, which is what stock Mesa uses.
 export EDEN_NX2_FORCE_MESH_FALLBACK=1
-exec "__REPO_BUILD_DIR__/bin/eden-cli" "$@"
+exec "$EDEN_EXEC" "$@"
 WRAP
-sed -i "s|__REPO_BUILD_DIR__|$BUILD_DIR|" "$APP_DIR/lichii-bc250"
+sed -i "s|__EDEN_EXEC__|$EDEN_EXEC|" "$APP_DIR/lichii-bc250"
 chmod +x "$APP_DIR/lichii-bc250"
 
 if [ ! -f "$APP_DIR/oot.ini" ]; then
@@ -1094,7 +1146,7 @@ MSG
     VDF=$(ls -1 "$HOME"/.local/share/Steam/userdata/*/config/shortcuts.vdf 2>/dev/null | head -1)
     [ -n "$VDF" ] || { echo "no shortcuts.vdf found (run Steam once first)" >&2; exit 1; }
     log "adding the Steam shortcut to $(basename "$(dirname "$(dirname "$VDF")")")"
-    python3 "$REPO_DIR/tools/bc250/add_steam_shortcut.py" \
+    python3 "$REPO_DIR_TOOLS/add_steam_shortcut.py" \
         --vdf "$VDF" --name "Zelda Ocarina of Time" \
         --exe "$APP_DIR/lichii-bc250" \
         --launch-options "-f -c \"$APP_DIR/oot.ini\" -g \"$(realpath "$GAME_PATH")\""
