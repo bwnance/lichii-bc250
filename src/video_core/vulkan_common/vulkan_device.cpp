@@ -1090,13 +1090,14 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             .flags = flags,
             .physicalDevice = physical,
             .device = *logical,
-            // Small blocks (SeparatePoolBlockSize, 8 MiB) on discrete GPUs too: with 256 MiB ones, Switch 2 titles' mix of
-            // texture sizes left ~38% of the image blocks empty (2 GB of an 8 GB card in title
-            // 1), which the texture cache counted as used and kept evicting textures for. With
-            // 64 MiB ones textures created and deleted by the thousand still left ~1.7 GB of holes
-            // after ten minutes, with 32 MiB ones ~0.5 GB: a block drains only once all of its
-            // images are gone, and fewer per block drain sooner. VMA gives allocations over half a
-            // block (8 MiB) their own memory, which goes back to the driver when they are freed.
+            // Small blocks on discrete GPUs too (SeparatePoolBlockSize, 8 MiB): with 256 MiB ones,
+            // Switch 2 titles' mix of texture sizes left ~38% of the image blocks empty (2 GB of an
+            // 8 GB card in title 1), which the texture cache counted as used and kept evicting
+            // textures for. With 64 MiB ones textures created and deleted by the thousand still
+            // left ~1.7 GB of holes after ten minutes, with 32 MiB ones ~0.5 GB, with 16 MiB ones
+            // 464 MiB (BC-250, Castle Town), with 8 MiB ones 22 MiB: a block drains only once all
+            // of its images are gone, and fewer per block drain sooner. VMA gives allocations over
+            // half a block their own memory, which goes back to the driver when they are freed.
             .preferredLargeHeapBlockSize = SeparatePoolBlockSize(),
             .pAllocationCallbacks = nullptr,
             .pDeviceMemoryCallbacks = nullptr,
