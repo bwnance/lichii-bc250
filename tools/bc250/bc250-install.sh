@@ -141,6 +141,10 @@ export EDEN_NX2_SPLIT=2          # split GPU thread: the back half runs on its o
 export EDEN_NX2_FENCE_BATCH=1    # batch GPU fence syncpoints
 export EDEN_NX2_FRAMES_AHEAD=2   # the game runs a frame ahead of the GPU threads: 13.6 -> 21.3 fps
 export EDEN_NX2_PRELOAD_ALL_PIPELINES=0  # cached pipelines build on first sight (boots faster)
+# Compile new shaders on 4 workers and 2 driver threads, and give back each worker's memory
+# after large shaders: on a first visit to Hyrule Field the default (all threads) took 3.7 GB at
+# once and froze the game for up to 13 s while the box swapped.
+export EDEN_NX2_PIPELINE_WORKERS=4 EDEN_NX2_PIPELINE_DRIVER_THREADS=2 EDEN_NX2_IR_POOL_CAP_MIB=64
 exec distrobox enter "$CONTAINER" -- "$REPO_BUILD_DIR/bin/eden-cli" "$@"
 WRAP
 sed -i "s|__REPO_BUILD_DIR__|$BUILD_DIR|" "$APP_DIR/lichii-bc250"
