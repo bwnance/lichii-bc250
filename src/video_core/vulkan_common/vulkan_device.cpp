@@ -1090,7 +1090,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             .flags = flags,
             .physicalDevice = physical,
             .device = *logical,
-            // 16 MiB blocks on discrete GPUs too: with 256 MiB ones, Switch 2 titles' mix of
+            // Small blocks (SeparatePoolBlockSize, 8 MiB) on discrete GPUs too: with 256 MiB ones, Switch 2 titles' mix of
             // texture sizes left ~38% of the image blocks empty (2 GB of an 8 GB card in title
             // 1), which the texture cache counted as used and kept evicting textures for. With
             // 64 MiB ones textures created and deleted by the thousand still left ~1.7 GB of holes
