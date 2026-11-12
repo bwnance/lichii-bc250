@@ -35,7 +35,8 @@ Field and in automated loops:
   reads as slight unevenness rather than stutter.
 - **No more long hitches in play** (v6): the worst pause after loading went from 1-2.6 s to about
   0.15 s. New effects can appear a frame or two late the first time they show up in a session.
-- **Loading an area** can still pause for about a second.
+- **Loading an area** can still pause for about a second; the first visit to a big area (Castle Town)
+  for 2-3 s.
 - **The very first boot** of the game shows a black screen for 3-5 minutes (see step 5).
 
 ## Setup in five steps
@@ -91,8 +92,30 @@ and survive its updates.
 
    **Check:** `cat /proc/sys/vm/compaction_proactiveness` shows `100`, also after a reboot.
 
-4. **Add a disk swapfile as a safety net.** Bazzite already has zram (compressed swap in RAM);
-   a 16 GB swapfile on disk keeps a long session from running out of memory outright. `/var` is
+4. **Keep 1.5 GB of RAM free ahead of time: watermark scale factor 1000.** A big area load needs
+   gigabytes of GPU memory at once (Ocarina's Castle Town: about 3 GB in 30 s). With Bazzite's
+   default (125) the kernel keeps only ~190 MB free, so every one of those allocations waits while
+   the kernel compresses other memory into swap: a 10-14 s freeze on the first visit. With 1000 the
+   kernel's background thread keeps ~1.5 GB free, and the same entry freezes for 2-3 s:
+
+   ```sh
+   printf 'vm.watermark_scale_factor = 1000\n' > /tmp/watermark.conf
+   sudo install -m 644 /tmp/watermark.conf /etc/sysctl.d/99-bc250-watermark.conf
+   sudo sysctl --system
+   ```
+
+   **Check:** `cat /proc/sys/vm/watermark_scale_factor` shows `1000`, also after a reboot.
+
+5. **Swap: a larger zram plus a disk swapfile as a safety net.** Bazzite already has zram
+   (compressed swap in RAM), sized at half of RAM (7.4 GB here). Long sessions in big areas filled
+   it, and swapping to disk then froze the game for up to 27 s. Make zram three quarters of RAM
+   (11 GB here; takes effect after a reboot):
+
+   ```sh
+   sudo sed -i 's#^zram-size *=.*#zram-size = min(ram * 3 / 4, 16384)#' /etc/systemd/zram-generator.conf
+   ```
+
+   A 16 GB swapfile on disk keeps a long session from running out of memory outright. `/var` is
    btrfs, which needs its own subvolume for a swapfile:
 
    ```sh
@@ -102,9 +125,10 @@ and survive its updates.
    echo '/var/swap/swapfile none swap defaults,pri=10 0 0' | sudo tee -a /etc/fstab
    ```
 
-   **Check:** `swapon --show` lists zram (priority 100) and the swapfile (priority 10).
+   **Check:** `swapon --show` lists zram (priority 100, about 11 GB after the reboot) and the swapfile
+   (priority 10).
 
-5. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
+6. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
    area load, under the kernel's default limit (half of RAM) but not by much:
 
    ```sh
@@ -115,7 +139,7 @@ and survive its updates.
 
    **Check:** `cat /proc/cmdline` contains `ttm.pages_limit=3145728`.
 
-6. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
+7. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
    console uses these (set with the BC-250 community tools and the image's
    `cyan-skillfish-governor-smu` config). They help a little; the steps above matter more.
    2000 MHz is above the image's default of 1850: watch your temperatures.
@@ -224,7 +248,7 @@ The numbers above were measured on this setup (step 1 with all the optional item
 |---|---|
 | OS | Bazzite (62fixolab BC-250 image), Gaming Mode at 1920x1080 |
 | Memory | 16 GB total, UMA carve-out 512 MB (~15.2 GB system RAM) |
-| Swap | zram (zstd) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100` |
+| Swap | zram (zstd, 3/4 of RAM) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100`, `vm.watermark_scale_factor=1000` |
 | CPU | 8 cores / 16 threads (stock boots with 6 cores) |
 | GPU | 40 compute units, governor 500-2000 MHz |
 | GPU memory limit | `ttm.pages_limit=3145728` (12 GB) |

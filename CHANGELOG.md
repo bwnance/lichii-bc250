@@ -4,6 +4,25 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v7 (branch `v7`, not merged yet) — 2026-11-12: shorter freezes in big areas
+
+- **New system setting: `vm.watermark_scale_factor=1000`** (README, step 1.4). Entering Hyrule Castle
+  Town the first time froze the game for 10-14 s (six runs): the area needs ~3 GB of GPU memory in
+  30 s, and each of ~140 allocations waited while the kernel compressed other memory into swap
+  (10.7-13 s of allocation time). With the kernel keeping ~1.5 GB free ahead of time the entry
+  freezes for 2-3 s, and the rest of the castle route has no pause over 0.15 s (before: up to
+  4.5 s). Hyrule Field loop: 58.4 screen fps, 4 repeated frames/s (before 57-58 fps, 8-12/s).
+  2000 was worse (more swapping in play).
+- **zram three quarters of RAM** (README, step 1.5; 7.4 -> 11 GB here). A 10-minute session in
+  Castle Town filled the old zram, the kernel moved on to the disk swapfile and the game froze for
+  up to 27 s.
+- **Lichii PR #1373 ported** (MWAITX idle wait for guest cores): within noise on the BC-250
+  (Hyrule Field walk 28.9 -> 29.0 game fps), kept because it matches upstream.
+- Measured and not adopted: GPU clock held at 2000 MHz (+0.3-0.8 game fps, inconclusive over
+  5-minute runs), Unsafe CPU accuracy, per-physical-core pinning, a 60 Hz guest vsync, a smaller
+  texture cache or ASTC decode cap for the castle load (no change), and suspending the texture
+  cache's keep-recent protection under memory pressure (smaller cache, no smoother play).
+
 ### v6 — 2026-11-12: stutters gone (memory and shader builds)
 
 Monitored play (Deku Tree, Hyrule Field, combat) showed the remaining drops were the 16 GB
