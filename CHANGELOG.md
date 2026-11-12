@@ -15,6 +15,14 @@ every merge into `main`. Entries before v4 are dated only.
   the game holds 30 fps. The first minute after an area load is still rough (~52 fps on
   screen): the load fills memory and the kernel swaps about 3 GB out, then pages part of it
   back in. That is the next target.
+- **New system setting: `vm.compaction_proactiveness=100`** (README, step 1). Monitoring a full
+  Deku Tree run showed the remaining drops are swap page-ins: the GPU driver's 2 MB allocations
+  made the kernel swap the game out while 2-4 GB of RAM was free. Background compaction cut the
+  10-second windows with drops from 69% to 43% and swap page-ins by 30%. 1-2 s freezes remain
+  when new content loads (GPU memory +1-2 GB); that is the next target.
+- **Installer:** fixed the launcher it writes (a fresh install could not start the game:
+  `REPO_BUILD_DIR` was never set in it); new `--pgo` builds with LLVM 23 and the bundled profile
+  (~10% faster); re-running it updates the frame generation settings in an existing `oot.ini`.
 - **From Lichii build 160:** #1095 (3D state registers written in one call), #1332 (front and
   back counters on separate cache lines), #1347 (shader clamp folding) and #1333 (read-only
   native compute bindings sized from their size word). #1333 replaces this fork's

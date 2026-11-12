@@ -76,7 +76,21 @@ and survive its updates.
 
    **Check:** `cat /proc/sys/vm/swappiness` shows `10`, also after a reboot.
 
-3. **Add a disk swapfile as a safety net.** Bazzite already has zram (compressed swap in RAM);
+3. **Keep memory defragmented: compaction proactiveness 100.** The GPU driver asks for memory in
+   2 MB blocks; when memory is fragmented the kernel frees space by swapping the game out, even
+   with gigabytes of RAM free, and the game stalls when it needs that memory back. Background
+   compaction prepares those blocks instead (in a Deku Tree session it cut the 10-second windows
+   with drops from 69% to 43%):
+
+   ```sh
+   printf 'vm.compaction_proactiveness = 100\n' > /tmp/compaction.conf
+   sudo install -m 644 /tmp/compaction.conf /etc/sysctl.d/99-bc250-compaction.conf
+   sudo sysctl --system
+   ```
+
+   **Check:** `cat /proc/sys/vm/compaction_proactiveness` shows `100`, also after a reboot.
+
+4. **Add a disk swapfile as a safety net.** Bazzite already has zram (compressed swap in RAM);
    a 16 GB swapfile on disk keeps a long session from running out of memory outright. `/var` is
    btrfs, which needs its own subvolume for a swapfile:
 
@@ -89,7 +103,7 @@ and survive its updates.
 
    **Check:** `swapon --show` lists zram (priority 100) and the swapfile (priority 10).
 
-4. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
+5. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
    area load, under the kernel's default limit (half of RAM) but not by much:
 
    ```sh
@@ -100,7 +114,7 @@ and survive its updates.
 
    **Check:** `cat /proc/cmdline` contains `ttm.pages_limit=3145728`.
 
-5. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
+6. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
    console uses these (set with the BC-250 community tools and the image's
    `cyan-skillfish-governor-smu` config). They help a little; the steps above matter more.
    2000 MHz is above the image's default of 1850: watch your temperatures.
@@ -209,7 +223,7 @@ The numbers above were measured on this setup (step 1 with all the optional item
 |---|---|
 | OS | Bazzite (62fixolab BC-250 image), Gaming Mode at 1920x1080 |
 | Memory | 16 GB total, UMA carve-out 512 MB (~15.2 GB system RAM) |
-| Swap | zram (zstd) plus a 16 GB disk swapfile, `vm.swappiness=10` |
+| Swap | zram (zstd) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100` |
 | CPU | 8 cores / 16 threads (stock boots with 6 cores) |
 | GPU | 40 compute units, governor 500-2000 MHz |
 | GPU memory limit | `ttm.pages_limit=3145728` (12 GB) |
