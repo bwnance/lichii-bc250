@@ -474,9 +474,6 @@ private:
     /// Runs the Garbage Collector.
     void RunGarbageCollector(bool out_of_memory);
 
-    /// True while EDEN_NX2_TC_MIN_AGE gives way to memory pressure.
-    bool MinAgeYields();
-
     /// Deletes images whose memory went entirely to newer images (see ClassifySuperseded).
     void DeleteSupersededImages();
 
@@ -752,10 +749,6 @@ private:
     /// Bytes of images per device memory block, for the collector (refreshed every 60 frames).
     std::unordered_map<u64, u64> block_image_bytes;
     u64 block_image_bytes_frame{~0ULL};
-    /// EDEN_NX2_TC_MIN_AGE under memory pressure (see MinAgeYields).
-    u64 host_available_frame{~0ULL};
-    bool host_memory_low{};
-    bool min_age_yielding{};
     DelayedDestructionRing<ImageView, TICKS_TO_DESTROY> sentenced_image_view;
     DelayedDestructionRing<Framebuffer, TICKS_TO_DESTROY> sentenced_framebuffers;
 

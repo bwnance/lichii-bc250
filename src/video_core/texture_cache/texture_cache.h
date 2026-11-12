@@ -185,36 +185,6 @@ void TextureCache<P>::DeleteSupersededImages() {
 }
 
 template <class P>
-bool TextureCache<P>::MinAgeYields() {
-    static const u64 ceil_pct = [] {
-        const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE_CEIL_PCT");
-        return value != nullptr ? std::strtoull(value, nullptr, 10) : 150ULL;
-    }();
-    static const u64 host_floor = [] {
-        const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE_HOST_MIB");
-        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 1536ULL) << 20;
-    }();
-    // Hysteresis: once suspended, the cache must fall to 90 % of the ceiling before it comes back.
-    const u64 ceiling = critical_memory / 100 * ceil_pct;
-    const bool over_ceiling =
-        ceil_pct != 0 && total_used_memory >= (min_age_yielding ? ceiling / 10 * 9 : ceiling);
-    // /proc/meminfo costs ~20 us: read it every 30 frames.
-    if (host_floor != 0 && (host_available_frame == ~0ULL || frame_tick - host_available_frame >= 30)) {
-        host_available_frame = frame_tick;
-        const auto available = Common::GetHostAvailableMemory();
-        host_memory_low = available.has_value() && *available < host_floor;
-    }
-    const bool yields = over_ceiling || host_memory_low;
-    if (yields != min_age_yielding) {
-        min_age_yielding = yields;
-        LOG_INFO(HW_GPU, "Texture cache: keep-recent protection {} (cache {} MiB, critical {} MiB, host memory {})",
-                 yields ? "suspended" : "restored", total_used_memory >> 20, critical_memory >> 20,
-                 host_memory_low ? "low" : "ok");
-    }
-    return yields;
-}
-
-template <class P>
 void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     const StutterTrace::SiteScope site{StutterTrace::Site::TextureCollect};
     bool high_priority_mode = false;
@@ -238,13 +208,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE");
             return value != nullptr ? std::strtoull(value, nullptr, 10) : 300ULL;
         }();
-        // The protection gives way under memory pressure: in a dense new area (Ocarina's Castle
-        // Town, first visit) nearly every image was used in the last 300 frames, so the cache grew
-        // to 3.8 GB against a 2 GB critical threshold, RAM ran out and the emulator stalled on
-        // swap for up to 27 s. Off while the cache is EDEN_NX2_TC_MIN_AGE_CEIL_PCT % of its
-        // critical threshold (default 150; 0: no ceiling) or the host has less than
-        // EDEN_NX2_TC_MIN_AGE_HOST_MIB available (default 1536; 0: never checked).
-        if (!out_of_memory && min_age != 0 && !MinAgeYields()) {
+        if (!out_of_memory) {
             ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
         }
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
