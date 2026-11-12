@@ -4,6 +4,34 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v6 — 2026-11-12: stutters gone (memory and shader builds)
+
+Monitored play (Deku Tree, Hyrule Field, combat) showed the remaining drops were the 16 GB
+board running out of RAM and swapping the game out, and new effects building their shaders on
+the GPU thread. In the owner's session after these changes the worst pause after loading was
+148 ms (before: 1-2.6 s) and no frame was held up by a shader build.
+
+- **Background shader translation** (`EDEN_NX2_BACKGROUND_TRANSLATE`, on): a new pipeline's
+  shaders translated on the GPU thread while it waited (17 ms on average, up to 80 ms). The
+  environments now copy the engine state translation reads and the whole build runs as a shader
+  job; draws the async-shader rule may drop are dropped until it is done, others wait for it.
+  Cold-cache test: frames held up by shader builds 68 -> 0.
+- **Image recycling** (`EDEN_NX2_IMAGE_RECYCLE_MIB`, 256): Ocarina renders its depth and HDR
+  targets at a new address every frame, so the emulator made a new 8 MiB image ~30 times a
+  second (1-2 GB of new GPU memory per 10 s), and every new block made the kernel swap. Freed
+  images of 4 MiB and more are kept and reused: -80% new GPU memory, -60% swap-outs.
+- **Shader compile caps** (installer: `EDEN_NX2_PIPELINE_WORKERS=4`,
+  `EDEN_NX2_PIPELINE_DRIVER_THREADS=2`, `EDEN_NX2_IR_POOL_CAP_MIB=64`): a first visit to Hyrule
+  Field compiled on 15 + 8 threads at once and took 3.7 GB, freezing the game for up to 13 s.
+  Capped: peak 3.7 GB instead of 5.6 GB, worst freeze 6.9 s instead of 13 s (cold cache).
+- **Smaller texture cache** (installer: 1.5 / 2 GB instead of 3 / 3.5 GB): ~2 GB more RAM free
+  in play, fewer swap stalls, no texture reloads seen.
+- **Parallel stage translation for texture tables up to 4 MiB** (`EDEN_NX2_TEX_POOL_FLUSH_MIB`):
+  Ocarina's is 1,058,176 bytes, just over the old 1 MiB limit.
+- **System setting from v5 now in the setup guide:** `vm.compaction_proactiveness=100`.
+- **Diagnostics:** "Device memory 10 s" log lines (new GPU memory and the commonest sizes),
+  slow pipeline builds log their phases, "Background translation" counts every 10 s.
+
 ### v5 — 2026-11-12: smoother frame delivery, Lichii build 160 picks, measuring tools
 
 - **Deeper presentation queue:** the template sets `frame_gen_queue_target=1` (4 presentation

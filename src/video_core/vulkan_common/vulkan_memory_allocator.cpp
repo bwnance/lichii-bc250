@@ -4,6 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
 #include <algorithm>
 #include <string>
 #include <cstdlib>
@@ -198,6 +202,93 @@ void MemoryCommit::Release() {
     size = 0;
 }
 
+namespace {
+// Image recycling (EDEN_NX2_IMAGE_RECYCLE_MIB, default 256, 0: off). Games render into transient
+// targets at a different address every frame (Ocarina: a 1920x1080 depth and an HDR colour
+// target, ~30 times a second), so the texture cache deletes the last frame's images as
+// superseded and makes new ones. Each new 8 MiB image took its own new device memory, which made
+// the kernel find fresh pages - 2 MiB ones first - and on the 16 GB BC-250 swap the game out
+// while RAM was free. Images of 4 MiB and more with their own memory are kept when destroyed (the
+// texture cache destroys them frames after their last use) and handed out again for an identical
+// create info. A new image's contents are undefined and every first use transitions it from
+// VK_IMAGE_LAYOUT_UNDEFINED, so a recycled one behaves the same.
+struct ImageRecyclePool {
+    struct Key {
+        std::vector<u32> words;
+        bool operator==(const Key&) const = default;
+    };
+    struct Entry {
+        Key key;
+        VkImage image;
+        VmaAllocation allocation;
+        u64 size;
+    };
+    std::mutex mutex;
+    u64 cap{};
+    u64 held{};
+    VmaAllocator allocator{};
+    std::unordered_map<VkImage, std::pair<Key, u64>> candidates; ///< Recyclable images in use
+    std::deque<Entry> free;
+    u64 hits{}, kept{}, evicted{};
+    std::chrono::steady_clock::time_point last_report{};
+};
+ImageRecyclePool g_image_pool;
+constexpr u64 MinRecycledImageBytes = 4ull << 20;
+
+/// The create info as words, or nullopt when it carries anything but a view format list.
+std::optional<ImageRecyclePool::Key> RecycleKey(const VkImageCreateInfo& ci) {
+    if (ci.tiling != VK_IMAGE_TILING_OPTIMAL ||
+        (ci.flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                     VK_IMAGE_CREATE_SPARSE_ALIASED_BIT)) != 0 ||
+        ci.sharingMode != VK_SHARING_MODE_EXCLUSIVE) {
+        return std::nullopt;
+    }
+    ImageRecyclePool::Key key;
+    key.words = {static_cast<u32>(ci.flags), static_cast<u32>(ci.imageType),
+                 static_cast<u32>(ci.format), ci.extent.width, ci.extent.height, ci.extent.depth,
+                 ci.mipLevels, ci.arrayLayers, static_cast<u32>(ci.samples), ci.usage,
+                 static_cast<u32>(ci.initialLayout)};
+    for (auto* next = static_cast<const VkBaseInStructure*>(ci.pNext); next != nullptr;
+         next = next->pNext) {
+        if (next->sType != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
+            return std::nullopt;
+        }
+        const auto* list = reinterpret_cast<const VkImageFormatListCreateInfo*>(next);
+        key.words.push_back(0xF0F0F0F0u);
+        for (u32 i = 0; i < list->viewFormatCount; ++i) {
+            key.words.push_back(static_cast<u32>(list->pViewFormats[i]));
+        }
+    }
+    return key;
+}
+
+bool RecycleImage(VmaAllocator allocator, VkImage image, VmaAllocation allocation) noexcept {
+    auto& pool = g_image_pool;
+    std::vector<ImageRecyclePool::Entry> destroy;
+    {
+        std::scoped_lock lock{pool.mutex};
+        const auto it = pool.candidates.find(image);
+        if (it == pool.candidates.end() || allocator != pool.allocator) {
+            return false;
+        }
+        pool.free.push_back({std::move(it->second.first), image, allocation, it->second.second});
+        pool.held += it->second.second;
+        pool.candidates.erase(it);
+        ++pool.kept;
+        while (pool.held > pool.cap && !pool.free.empty()) {
+            pool.held -= pool.free.front().size;
+            destroy.push_back(std::move(pool.free.front()));
+            pool.free.pop_front();
+            ++pool.evicted;
+        }
+    }
+    for (const auto& entry : destroy) {
+        vmaDestroyImage(allocator, entry.image, entry.allocation);
+    }
+    return true;
+}
+} // Anonymous namespace
+
 MemoryAllocator::MemoryAllocator(const Device &device_)
         : device{device_}, allocator{device.GetAllocator()},
             properties{device_.GetPhysical().GetMemoryProperties().memoryProperties},
@@ -218,9 +309,34 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
             }
         });
     }
+    {
+        static const u64 recycle_cap = [] {
+            const char* value = std::getenv("EDEN_NX2_IMAGE_RECYCLE_MIB");
+            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;
+        }();
+        std::scoped_lock lock{g_image_pool.mutex};
+        if (recycle_cap != 0 && g_image_pool.allocator == nullptr) {
+            g_image_pool.cap = recycle_cap;
+            g_image_pool.allocator = allocator;
+            vk::g_image_recycler = RecycleImage;
+        }
+    }
 }
 
 MemoryAllocator::~MemoryAllocator() = default;
+
+void ReleaseImageRecyclePool() {
+    std::scoped_lock lock{g_image_pool.mutex};
+    vk::g_image_recycler = nullptr;
+    for (const auto& entry : g_image_pool.free) {
+        vmaDestroyImage(g_image_pool.allocator, entry.image, entry.allocation);
+    }
+    g_image_pool.free.clear();
+    g_image_pool.candidates.clear();
+    g_image_pool.held = 0;
+    g_image_pool.cap = 0;
+    g_image_pool.allocator = nullptr;
+}
 
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
 {
@@ -240,6 +356,32 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                         vk::Image &image) const {
+    std::optional<ImageRecyclePool::Key> recycle_key;
+    if (g_image_pool.cap != 0) {
+        recycle_key = RecycleKey(ci);
+        if (recycle_key) {
+            auto& pool = g_image_pool;
+            std::scoped_lock lock{pool.mutex};
+            const auto it = std::ranges::find(pool.free, *recycle_key, &ImageRecyclePool::Entry::key);
+            if (it != pool.free.end()) {
+                const ImageRecyclePool::Entry entry = std::move(*it);
+                pool.free.erase(it);
+                pool.held -= entry.size;
+                pool.candidates.emplace(entry.image, std::make_pair(entry.key, entry.size));
+                ++pool.hits;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - pool.last_report > std::chrono::seconds{30}) {
+                    pool.last_report = now;
+                    LOG_INFO(Render_Vulkan,
+                             "Image recycling: {} reused, {} kept, {} evicted, {} MiB held",
+                             pool.hits, pool.kept, pool.evicted, pool.held >> 20);
+                }
+                image = vk::Image(entry.image, ci.usage, *device.GetLogical(), allocator,
+                                  entry.allocation, device.GetDispatchLoader());
+                return VK_SUCCESS;
+            }
+        }
+    }
     const VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block.
@@ -355,6 +497,16 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         );
     }
 
+    if (recycle_key && alloc_info.size >= MinRecycledImageBytes &&
+        (alloc_ci.preferredFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+        VmaAllocationInfo2 info2{};
+        vmaGetAllocationInfo2(allocator, allocation, &info2);
+        if (info2.dedicatedMemory) {
+            std::scoped_lock lock{g_image_pool.mutex};
+            g_image_pool.candidates.emplace(handle,
+                                            std::make_pair(std::move(*recycle_key), alloc_info.size));
+        }
+    }
     image = vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
                       device.GetDispatchLoader());
     return VK_SUCCESS;

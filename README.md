@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v5
+# lichii-bc250 v6
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -21,20 +21,21 @@ All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; thi
 carries the BC-250-specific changes on top. GPLv3, like upstream. The repository was called
 `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
-**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v5 delivers frames to the TV more
-evenly (near-stable 60 on screen after the first minute of an area) and adds upstream Lichii
-build 160 fixes.
+**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v6 removes the stutters: new effects
+no longer freeze the picture while their shaders build, and the emulator uses much less memory,
+so the system stops swapping the game out in the middle of play.
 
 ## How it plays
 
-Measured on the reference console (below) in Kokiri Forest, five-minute loops of walking and
-camera spins:
+Measured on the reference console (below), in play sessions through the Deku Tree and Hyrule
+Field and in automated loops:
 
-- **From the second minute in an area on:** 59.9-60 fps on screen with almost no repeated
-  frames. The game itself runs at 30 fps; FSR3 frame generation adds one frame between each pair.
-- **The first minute after an area load is rougher** (~52 fps on screen, visible hitches): the
-  load fills the 16 GB of memory and the system swaps for a while. Improving this is the next
-  goal.
+- **About 60 fps on screen.** The game runs at 28-30 fps; FSR3 frame generation adds one frame
+  between each pair. When the game dips under 30 the TV shows a frame twice now and then, which
+  reads as slight unevenness rather than stutter.
+- **No more long hitches in play** (v6): the worst pause after loading went from 1-2.6 s to about
+  0.15 s. New effects can appear a frame or two late the first time they show up in a session.
+- **Loading an area** can still pause for about a second.
 - **The very first boot** of the game shows a black screen for 3-5 minutes (see step 5).
 
 ## Setup in five steps

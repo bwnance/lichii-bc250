@@ -190,9 +190,27 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    /// Copies the engine state translation reads (this stage's constant buffer bindings, the
+    /// texture header table, the viewport transform and HLE replacements), so the program can
+    /// translate on a worker while the GPU thread moves on (background translation). Guest memory
+    /// is still read through the memory manager; flush the texture header table first
+    /// (SetTexturePoolFlushed).
+    void SnapshotState();
+
 private:
+    struct StateSnapshot {
+        std::array<Tegra::Engines::ConstBufferInfo, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+            const_buffers{};
+        GPUVAddr tex_header_address{};
+        u32 tex_header_limit{};
+        bool via_header_index{};
+        u32 viewport_transform{};
+        ::Common::unordered_map<u64, Tegra::Engines::Maxwell3D::HLEReplacementAttributeType> replace_table;
+    };
+
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
+    std::shared_ptr<const StateSnapshot> snapshot;
 };
 
 class ComputeEnvironment final : public GenericEnvironment {

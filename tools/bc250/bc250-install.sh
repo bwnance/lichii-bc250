@@ -157,9 +157,10 @@ cat > "$APP_DIR/lichii-bc250" <<'WRAP'
 set -euo pipefail
 unset LD_PRELOAD
 # The BC-250 iGPU (RADV) with UMA: cap the texture cache so it never tramples
-# the 15 GB of system RAM the game and the compositor also live in.
-export EDEN_NX2_TC_EXPECTED_MIB=3072
-export EDEN_NX2_TC_CRITICAL_MIB=3584
+# the 15 GB of system RAM the game and the compositor also live in. 1.5/2 GB (v6) left
+# ~2 GB more RAM free in play than 3/3.5 GB, with fewer swap stalls and no texture reloads.
+export EDEN_NX2_TC_EXPECTED_MIB=1536
+export EDEN_NX2_TC_CRITICAL_MIB=2048
 export EDEN_NX2_VSYNC_HZ=30       # the game starts its frames on a 30 Hz tick
 export EDEN_NX2_SWAP_INTERVAL=2   # present every second vblank; the game asks for 30 fps
 export EDEN_VI2_MAX_RESOLUTION_MODE=1  # report the handheld display mode
@@ -167,6 +168,10 @@ export EDEN_NX2_SPLIT=2          # split GPU thread: the back half runs on its o
 export EDEN_NX2_FENCE_BATCH=1    # batch GPU fence syncpoints
 export EDEN_NX2_FRAMES_AHEAD=2   # the game runs a frame ahead of the GPU threads: 13.6 -> 21.3 fps
 export EDEN_NX2_PRELOAD_ALL_PIPELINES=0  # cached pipelines build on first sight (boots faster)
+# Compile new shaders on 4 workers and 2 driver threads, and give back each worker's memory
+# after large shaders: on a first visit to Hyrule Field the default (all threads) took 3.7 GB at
+# once and froze the game for up to 13 s while the box swapped.
+export EDEN_NX2_PIPELINE_WORKERS=4 EDEN_NX2_PIPELINE_DRIVER_THREADS=2 EDEN_NX2_IR_POOL_CAP_MIB=64
 # The BC-250 has no mesh hardware, but some Mesa builds (e.g. the BC-250 toolkit's 26.2.6)
 # advertise VK_EXT_mesh_shader anyway; native task/mesh draws then render white. Keep the
 # emulator's own compute fallback, which is what stock Mesa uses.
