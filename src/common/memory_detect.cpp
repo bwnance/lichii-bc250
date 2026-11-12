@@ -134,6 +134,18 @@ std::optional<u64> GetSystemCommitRoom() {
     return std::nullopt;
 }
 
+std::optional<u64> GetHostAvailableMemory() {
+#ifdef __linux__
+    std::ifstream file{"/proc/meminfo"};
+    const std::string meminfo{std::istreambuf_iterator<char>{file}, {}};
+    const u64 available = ProcKilobytesField(meminfo, "MemAvailable:");
+    if (available != 0) {
+        return available;
+    }
+#endif
+    return std::nullopt;
+}
+
 u64 ProcKilobytesField(std::string_view text, std::string_view key) {
     for (size_t start = 0; start < text.size();) {
         size_t end = text.find('\n', start);

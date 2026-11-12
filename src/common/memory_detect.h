@@ -38,6 +38,10 @@ struct ProcessMemoryUsage {
 /// minus what is committed. No value where the host reports no such limit (anything but Windows).
 [[nodiscard]] std::optional<u64> GetSystemCommitRoom();
 
+/// Memory the host can still give out without swapping, in bytes (Linux MemAvailable). No value
+/// where the host reports none (anything but Linux).
+[[nodiscard]] std::optional<u64> GetHostAvailableMemory();
+
 /// The value of a "Key:   1234 kB" line of /proc/self/status or /proc/meminfo, in bytes. `key`
 /// includes the colon and must start a line. 0 when the field is missing or malformed.
 [[nodiscard]] u64 ProcKilobytesField(std::string_view text, std::string_view key);
