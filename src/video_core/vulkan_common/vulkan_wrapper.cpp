@@ -530,6 +530,10 @@ void Image::SetObjectNameEXT(const char* name) const {
 
 void Image::Release() const noexcept {
     if (handle) {
+        if (allocation != nullptr && g_image_recycler != nullptr &&
+            g_image_recycler(allocator, handle, allocation)) {
+            return;
+        }
         vmaDestroyImage(allocator, handle, allocation);
     }
 }

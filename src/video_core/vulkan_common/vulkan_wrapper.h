@@ -691,6 +691,11 @@ public:
     }
 };
 
+/// Called with an image about to be destroyed; returns true when it keeps the image and its
+/// memory for reuse instead (MemoryAllocator's image recycling), false to destroy it as usual.
+using ImageRecycler = bool (*)(VmaAllocator allocator, VkImage image, VmaAllocation allocation) noexcept;
+inline ImageRecycler g_image_recycler{};
+
 class Image {
 public:
     explicit Image(VkImage handle_, VkImageUsageFlags usage_, VkDevice owner_,

@@ -37,6 +37,7 @@
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/shader_cache_v2/cache.h"
@@ -1114,6 +1115,7 @@ Device::~Device() {
             }
         }
     }
+    ReleaseImageRecyclePool();
     vmaDestroyAllocator(allocator);
     ReleaseMemoryReserve(*logical);
 }
