@@ -44,7 +44,8 @@ jobs:
       - name: Check out the tag
         uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          # Full ref: a branch can share the tag's name (branch v7, tag v7).
+          ref: refs/tags/${{ env.TAG }}
 
       - name: Install dependencies
         run: |
