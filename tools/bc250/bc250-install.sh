@@ -3,8 +3,8 @@
 #
 # Usage:  ./tools/bc250/bc250-install.sh [--pgo] [--with-shortcut] [--game <path>]
 #
-#   --pgo            build with LLVM 23 and the bundled Lichii profile (~10% more fps; downloads
-#                    ~2 GB once and keeps ~600 MB of it in ~/.local/share/lichii-bc250/llvm23)
+#   --pgo            build with the bundled Lichii profile (~10% more fps) using the system LLVM
+#                    (clang 22+); with an older one, downloads LLVM 23 (~2 GB, keeps ~600 MB)
 #   --with-shortcut  add a Steam non-Steam shortcut (needs --game and Steam stopped)
 #   --game <path>    your own Ocarina of Time dump, for the shortcut
 #
@@ -58,7 +58,7 @@ fi
 
 # --- 1. Build dependencies ----------------------------------------------------
 DEPS=(
-    base-devel git curl autoconf cmake ninja pkgconf clang nasm patch make jq
+    base-devel git curl autoconf cmake ninja pkgconf clang llvm lld nasm patch make jq
     fmt glslang spirv-tools hidapi nlohmann-json libtool libusb zstd lz4 openssl
     libpulse speexdsp wayland zlib ffmpeg libxext boost sdl3
 )
@@ -97,9 +97,16 @@ if [ "$WITH_PGO" = 1 ]; then
     BUILD_DIR="$REPO_DIR/build-pgo"
     PROFILE="$REPO_DIR/lichii-linux.profdata"
     [ -f "$PROFILE" ] || { echo "missing $PROFILE (the PGO profile ships with the repo)" >&2; exit 1; }
-    if [ ! -x "$LLVM_DIR/bin/clang" ]; then
-        # The profile needs LLVM 23; the distro's clang may not read it. Only the compiler,
-        # linker, archiver and clang's own headers are kept (~600 MB of the 12 GB release).
+    # The profile is indexed format 14, which clang 22 and newer read. CachyOS ships a recent
+    # LLVM; use it when it is new enough and has the linker and archiver, else download LLVM.
+    SYS_CLANG_MAJOR=$(clang -dumpversion 2>/dev/null | cut -d. -f1)
+    if [ "${SYS_CLANG_MAJOR:-0}" -ge 22 ] && command -v ld.lld llvm-ar llvm-ranlib >/dev/null; then
+        LLVM_BIN="$(dirname "$(command -v clang)")"
+        log "PGO with the system LLVM (clang $(clang -dumpversion))"
+    elif [ ! -x "$LLVM_DIR/bin/clang" ]; then
+        LLVM_BIN="$LLVM_DIR/bin"
+        # Only the compiler, linker, archiver and clang's own headers are kept (~600 MB of the
+        # 12 GB release).
         log "downloading LLVM $LLVM_VERSION (~2 GB, streamed; keeps ~600 MB)"
         mkdir -p "$LLVM_DIR"
         curl -fL "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/LLVM-$LLVM_VERSION-Linux-X64.tar.xz" |
@@ -107,10 +114,12 @@ if [ "$WITH_PGO" = 1 ]; then
                 "*/bin/clang" "*/bin/clang++" "*/bin/clang-[0-9]*" "*/bin/lld" "*/bin/ld.lld" \
                 "*/bin/llvm-ar" "*/bin/llvm-ranlib" "*/lib/clang/*"
         [ -x "$LLVM_DIR/bin/clang" ] || { echo "LLVM download failed" >&2; exit 1; }
+    else
+        LLVM_BIN="$LLVM_DIR/bin"
     fi
     PGO_FLAGS="-fprofile-use=$PROFILE -Wno-backend-plugin -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
-    CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$LLVM_DIR/bin/clang" -DCMAKE_CXX_COMPILER="$LLVM_DIR/bin/clang++"
-                 -DCMAKE_AR="$LLVM_DIR/bin/llvm-ar" -DCMAKE_RANLIB="$LLVM_DIR/bin/llvm-ranlib"
+    CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$LLVM_BIN/clang" -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++"
+                 -DCMAKE_AR="$LLVM_BIN/llvm-ar" -DCMAKE_RANLIB="$LLVM_BIN/llvm-ranlib"
                  -DCMAKE_C_FLAGS="$PGO_FLAGS" -DCMAKE_CXX_FLAGS="$PGO_FLAGS"
                  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DENABLE_LTO=OFF)
 else

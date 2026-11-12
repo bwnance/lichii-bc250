@@ -160,9 +160,10 @@ This takes 30-60 minutes the first time (later updates are faster). It:
 
 1. installs the build tools with pacman (asks for sudo once) and the controller udev rule
    from step 1;
-2. with `--pgo`, downloads LLVM 23 once (~2 GB, of which ~600 MB is kept in
-   `~/.local/share/lichii-bc250/llvm23`) and builds with Lichii's performance profile, which is
-   about 10% faster. Leave `--pgo` out to build with the system's clang instead;
+2. with `--pgo`, builds with Lichii's performance profile, about 10% faster. CachyOS's own
+   LLVM (clang 22 or newer, installed in step 1) reads the profile; with an older clang the
+   installer downloads LLVM 23 once (~2 GB, ~600 MB kept in `~/.local/share/lichii-bc250/llvm23`).
+   Leave `--pgo` out to build with the system's clang and no profile;
 3. builds the emulator (`eden-cli`, no desktop GUI);
 4. installs the launcher `~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250
    tuning, and the game settings `~/Applications/lichii-bc250/oot.ini` (frame generation, the
