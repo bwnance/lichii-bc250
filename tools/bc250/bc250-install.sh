@@ -131,9 +131,10 @@ CONTAINER=lichii-bc250-build
 REPO_BUILD_DIR="__REPO_BUILD_DIR__"
 unset LD_PRELOAD
 # The BC-250 iGPU (RADV) with UMA: cap the texture cache so it never tramples
-# the 15 GB of system RAM the game and the compositor also live in.
-export EDEN_NX2_TC_EXPECTED_MIB=3072
-export EDEN_NX2_TC_CRITICAL_MIB=3584
+# the 15 GB of system RAM the game and the compositor also live in. 1.5/2 GB (v6) left
+# ~2 GB more RAM free in play than 3/3.5 GB, with fewer swap stalls and no texture reloads.
+export EDEN_NX2_TC_EXPECTED_MIB=1536
+export EDEN_NX2_TC_CRITICAL_MIB=2048
 export EDEN_NX2_VSYNC_HZ=30       # the game starts its frames on a 30 Hz tick
 export EDEN_NX2_SWAP_INTERVAL=2   # present every second vblank; the game asks for 30 fps
 export EDEN_VI2_MAX_RESOLUTION_MODE=1  # report the handheld display mode
