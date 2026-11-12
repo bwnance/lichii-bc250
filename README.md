@@ -10,420 +10,75 @@
 > console; use it only with backups of content you legally own. Do not open issues about
 > obtaining games, keys or firmware — they will be closed.
 
-A [Lichii](https://github.com/zortos293/Lichii) fork optimized for the **AMD BC-250
-console** (GFX1013-class iGPU, RADV, 1080p TV output, 16 GB of memory shared by the CPU and
-the GPU with a small UMA carve-out). It is not limited to one game: the work here targets
-the BC-250 itself (memory pressure, swap, device-memory peaks, the texture cache, the
-container the emulator runs in), so it helps whatever runs on it. **The Legend of Zelda:
-Ocarina of Time (Switch 2)** is the title it has been tuned and measured on so far, so the
-numbers and the installer's defaults below are for it; other games are planned.
-
-This repository was called `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
+A [Lichii](https://github.com/zortos293/Lichii) fork optimized for the **AMD BC-250 console**
+(GFX1013-class iGPU, RADV, 1080p TV output, 16 GB of memory shared by the CPU and the GPU). The
+work targets the BC-250 itself (memory pressure, swap, GPU memory peaks, the container the
+emulator runs in), so it helps whatever runs on it. **The Legend of Zelda: Ocarina of Time
+(Switch 2)** is the title it has been tuned and measured on so far, so the numbers and the
+installer's defaults are for it; other games are planned.
 
 All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; this repo only
-carries the BC-250-specific deltas on top. GPLv3, like upstream.
+carries the BC-250-specific changes on top. GPLv3, like upstream. The repository was called
+`oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
-**Base:** Lichii `nx2` **build 150** (`17baed716d`, 2026-11-10), with this fork's commits on
-top. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
-`~/.cache/eden`): see the build 150 notes below.
+**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v5 delivers frames to the TV more
+evenly (near-stable 60 on screen after the first minute of an area) and adds upstream Lichii
+build 160 fixes.
 
-## Changelog
+## How it plays
 
-The title carries the version of `main`; it goes up by one with every merge into `main`.
+Measured on the reference console (below) in Kokiri Forest, five-minute loops of walking and
+camera spins:
 
-### v5 — 2026-11-12: smoother frame delivery, Lichii build 160 picks, measuring tools
+- **From the second minute in an area on:** 59.9-60 fps on screen with almost no repeated
+  frames. The game itself runs at 30 fps; FSR3 frame generation adds one frame between each pair.
+- **The first minute after an area load is rougher** (~52 fps on screen, visible hitches): the
+  load fills the 16 GB of memory and the system swaps for a while. Improving this is the next
+  goal.
+- **The very first boot** of the game shows a black screen for 3-5 minutes (see step 5).
 
-- **Deeper presentation queue:** the template sets `frame_gen_queue_target=1` (4 presentation
-  frames instead of 3). Frames that come out early bank time for late ones, so frames reach
-  the TV more evenly. On the TV it felt much smoother, near-stable 60 after a few minutes,
-  with no noticeable input lag. To go back, set `frame_gen_queue_target=0`.
-- **What 60 fps looks like on this route:** five-minute loops (walk, camera spin, walk back)
-  show the screen at 59.9-60 fps with almost no repeated frames from the second minute on;
-  the game holds 30 fps. The first minute after an area load is still rough (~52 fps on
-  screen): the load fills memory and the kernel swaps about 3 GB out, then pages part of it
-  back in. That is the next target.
-- **From Lichii build 160:** #1095 (3D state registers written in one call), #1332 (front and
-  back counters on separate cache lines), #1347 (shader clamp folding) and #1333 (read-only
-  native compute bindings sized from their size word). #1333 replaces this fork's
-  `EDEN_NX2_NATIVE_COMPUTE_FULL` opt-in: Ocarina no longer gets a 1 GiB buffer. The advertised
-  shader compile speed-up (#1320) was already in v4.
-- **More draws take the light (delta) path:** OoT's per-draw occlusion tests (counter resets,
-  render-enable changes, report writes) and its macros' memory-read registers no longer force a
-  full draw setup; `EDEN_NX2_FAST_DRAW_VERIFY=1` found no difference in five runs. No
-  measurable fps change on its own.
-- **New diagnostics (all off by default):**
-  - a `Screen:` log line every 10 s: presents per second and frames the TV showed twice;
-  - `EDEN_NX2_TIMELINE=<file>`: a Chrome-trace timeline of the GPU threads, started by
-    creating `/tmp/nx2-timeline-go`;
-  - `EDEN_NX2_LIST_RTT=1`: latency of GPU-written command lists;
-  - `EDEN_NX2_CMDPAGE_DIAG=1`: now also counts which GPU path writes them.
-- **Investigated without a gain, so not in v5:**
-  - skipping drains on equal/mask semaphore waits;
-  - parking channels while their command lists are written;
-  - Mailbox and FIFO-relaxed present modes;
-  - a third GPU thread (the front/back split already separates register processing from
-    draws).
+## Setup in five steps
 
-### v4 — 2026-11-11 (night): frame generation always 2x (~60 fps on screen)
+You need a BC-250 running **Bazzite** with the BC-250 patches (the
+[62fixolab images](https://github.com/62fixolab/Latest-Bazzite-AMD-BC-250-Patched-Images)
+are what the reference console uses), a controller, and your own game dump, keys and firmware.
+Do everything on the BC-250 itself (Desktop Mode, or over ssh); commands with `sudo` ask for
+your password. Each step ends with a **Check** so you know it worked.
 
-- The template now sets `frame_gen_target_rate=0`: FSR3 frame generation always adds one
-  frame per game frame (multiplier 2). The old `30` only filled dips below 30 fps, so the
-  screen stayed at ~30. Route 2, 3 runs each: target 30 = game 28.5 / 29.4 fps (walk /
-  spin), screen ~30; **target 0 = game 26.6 / 28.0, screen ~46-60**, frames over 50 and
-  100 ms about the same as with 30.
-- `frame_gen_target_rate=60` is **not** recommended: with any target set the multiplier is
-  ignored and the pacer goes to 3x; each generated frame takes a vsync slot, so the game
-  drops to 60/3 = 20 fps (walk 20.3, ~250 frames over 50 ms, worst up to 635 ms).
-- New log line every 10 s while frame generation is on:
-  `Frame gen output: X game fps + Y generated fps = Z fps`, since the in-emulator counters
-  only count game frames.
-- Cost: one game frame of extra input lag (~35 ms) and the usual interpolation artifacts on
-  fast edges and the HUD. To go back, set `frame_gen_target_rate=30`.
+### Step 1: prepare the BC-250 (once)
 
-### 2026-11-11 (evening): stutter fixes, renamed to lichii-bc250
+These system changes are what the measured performance assumes. They are outside the emulator
+and survive its updates.
 
-Measured on a new, harder route: after the 30 s Kokiri Forest walk, a 12 s camera spin, 15 s
-walking back through the open forest and another 12 s spin (3 runs per build).
-
-| | before | now |
-|---|---|---|
-| frames over 100 ms (route) | 10 / 8 / 9 | 2 / 2 / 1 |
-| frames over 50 ms (route) | 95 / 70 / 90 | 21 / 27 / 8 |
-| fps (route) | ~26.5 | 28.4-29.9 |
-| fps (30 s walk) | 26.9-27.5 | 28.1-30.3 |
-| device-memory peak | ~6.1 GB | 4.5-5.0 GB |
-
-- **Texture cache keeps images used in the last 300 frames** (`EDEN_NX2_TC_MIN_AGE`, ~10 s at
-  30 fps; not when device memory runs out). On the BC-250 the cache sits above its critical
-  threshold all session, and the collector deleted everything unused for 10 frames: Ocarina's
-  6144x6144 ASTC texture was deleted and rebuilt every ~2.6 s as the camera turned (a new
-  image, a 192 MiB decode and a 50-190 ms frame each time). This was most of the remaining
-  stutter.
-- **ASTC decode images are recycled as soon as the GPU is done with them** and capped in
-  flight (`EDEN_NX2_ASTC_PENDING_MIB`, default 256). At the save load's memory peak, 449
-  decode images held 2.3 GB at once; the peak drops by ~1.7 GB.
-- **Fix: GPU write fault (device lost) in ASTC transcodes.** The transcode submits after every
-  decode, so its staging buffers were still used after the tick they were stamped with, and
-  the pool could free one while the GPU wrote it.
-- **Lichii ports:** #1313 (built-in fix for Ocarina's guard-house freeze), #1314 (guard house
-  from single digits to 50+ fps, superseded images deleted), #852, #1320, #1327, #1331, and
-  #1225's JIT warm-up list as an opt-in (`EDEN_NX2_JIT_WARMUP_LIST=1`; every core compiles the
-  whole list, which costs RAM). Not taken: #1334/#1337 (keep pipelines in memory: +~90 MiB for
-  rare hitches), #1335 (device-memory overallocation).
-- **Diagnostics:** `EDEN_NX2_VMA_PEAK_DUMP=<path>` writes VMA's allocation map at each new
-  device-memory high; `EDEN_NX2_LARGE_IMAGE_MIB=<n>` now also logs why large images are deleted.
-- **Controllers reconnect** (see below) and the repo, installer container
-  (`lichii-bc250-build`) and wrapper (`~/Applications/lichii-bc250/lichii-bc250`) are renamed.
-  An older install keeps working; its container can be removed with
-  `distrobox rm lichii-bc250-build`.
-
-
-### 2026-11-11 (afternoon): controllers reconnect
-
-- **A pad that disconnects and comes back works again without restarting the game**, and a pad
-  switched on after launch is picked up too. Inside a rootless container (the distrobox the
-  installer uses) libudev drops the host's hotplug messages, so SDL never saw a controller
-  leave or return. When `/run/.containerenv` or `/.dockerenv` exists the emulator now sets
-  `SDL_JOYSTICK_DISABLE_UDEV=1`, so SDL watches `/dev/input` with inotify instead (set the
-  variable yourself to override). Controller add/remove is logged at Info level. Verified by
-  unbinding and rebinding the Xbox 360 receiver mid-game: Steam re-creates its virtual pad and
-  the emulator puts it back in the same player slot about a second later.
-
-### 2026-11-11 (night): PGO build, smaller JIT tables, three Lichii PRs
-
-- **PGO build: about +10% world fps.** Built with clang 23 and `lichii-linux.profdata` (from
-  zortos293/Lichii PR #1205: Lichii's profile merged with a Linux Ocarina of Time run on a
-  Zen 2 CPU and RADV). Straight Kokiri Forest walk, same source: 26.6 / 26.4 / 28.1 fps with
-  the profile against 24.3 / 24.3 without, and fewer slow frames (73-98 over 50 ms per walk
-  against 105-120). See "Building with PGO" below.
-- **Fastmem patch entries 24 -> 20 bytes** in dynarmic: the block location, the same for every
-  access of a block, is stored once per block.
-- **Lichii PRs not merged upstream yet:** #1271 (hand freed heap memory back to Linux after
-  pipeline evictions), #1241 (Ocarina's recreated post-processing targets skip a pointless
-  upload), #1265 (no perf-map lock per compiled block). No measurable change on the walk.
-
-#### Building with PGO
-
-The profile is indexed format 14: it needs clang 22 or newer (Fedora 42's clang 20 cannot read
-it). LLVM's prebuilt `LLVM-23.1.5-Linux-X64.tar.xz` from the LLVM GitHub releases works inside
-the build container. Same configure as usual, plus:
-
-```sh
-L=/path/to/LLVM-23.1.5-Linux-X64/bin
-P="-fprofile-use=$PWD/lichii-linux.profdata -Wno-backend-plugin -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
-cmake -S . -B build-pgo -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER=$L/clang -DCMAKE_CXX_COMPILER=$L/clang++ \
-  -DCMAKE_AR=$L/llvm-ar -DCMAKE_RANLIB=$L/llvm-ranlib \
-  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld "-DCMAKE_C_FLAGS=$P" "-DCMAKE_CXX_FLAGS=$P" \
-  -DENABLE_QT=OFF -DYUZU_CMD=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_LTO=OFF
-cmake --build build-pgo --target eden-cli -j6
-```
-
-Functions changed since the profile was recorded just lose their profile data (the warnings
-are switched off); the rest is optimized for Ocarina's hot paths.
-
-### 2026-11-11 (later): Fritchii v5.6-v5.8.3 ports
-
-Owner's verdict after playing it: "works really well most of the time above 30 fps with just
-2 minor drops to 20 fps, best candidate so far". Measured on the straight Kokiri Forest walk:
-~25 fps world rate (23.2-24.5 before).
-
-- **Hot guest pages stay unprotected** (port of Eglantine f27522bfb9 via Fritchii, `EDEN_NX2_EXP48`,
-  on; `=0` turns it off). Pages the game's CPU rewrites every frame were write-protected after
-  each upload and faulted on the next write; they now stay modified and are uploaded at most
-  once a frame. About +1 fps on the walk, no memory cost. A page written again after its upload
-  reaches the GPU one frame later; no flicker seen in play.
-- **No empty GPU submissions** (`EDEN_NX2_EXP61`, on), counting batched uploads as work.
-- **JIT: dynarmic's IR verification pass skipped** (`EDEN_NX2_JIT_FAST_COMPILE=0` keeps it).
-- **A compute pipeline being rebuilt keeps dispatching** instead of freezing up to ~3 s
-  (Lichii #969).
-- Off by default here: `EDEN_NX2_JIT_WARM=1` (idle cores pre-compile game code: +600 MB RSS and
-  one boot hang in four runs on the BC-250), `EDEN_NX2_IR_POOL_CAP_MIB=<n>` (no effect measured).
-- Not taken: Fritchii's EXP56, EXP58, EXP53, the read throttle switch and the report/fence
-  allocation rework (already covered by this base, specific to Fritchii's texture cache, or
-  tied to features this base doesn't have).
-- Measured: 663 MiB of the ~3.7 GiB of resident guest memory holds only zeros. Lichii's
-  zero-page trim is Windows-only; a safe Linux equivalent is still open.
-
-### 2026-11-11: Lichii build 150, memory trims, Max Resolution on
-
-Measured on the owner's test (load the save in Kokiri Forest, walk straight ahead for 30 s;
-two runs each): **~25 fps** world rate, peak GPU memory ~6.4-6.5 GB, image noticeably sharper.
-
-- **Rebased on Lichii build 150.** Brings upstream's drain-free semaphore acquires (#949),
-  cheaper per-draw work on the split back thread (#858), memory-reading macros run on the
-  back thread (#1056), staging buffer reuse (#778), the Ocarina **white wash / blown-out
-  lighting** fix (#1236), the ocarina crackle fix (#1196) and stand-ins for damaged texture
-  members (#1197). The fork's own copies of the task/mesh fallback, `MADV_COLD` (#756) and
-  #841 are now upstream's. The fork's macro DMA-read fast path is dropped: upstream's
-  #1056 replaces it (`EDEN_NX2_DMA_READ_DRAIN` / `_RELAXED` no longer exist). Build 150 alone
-  is about 7% faster than the previous build on the walk.
-- **Max Resolution add-on on** (installer template and reference setup). The game renders
-  its scene at full 1080p instead of upscaling a lower resolution; the "dreamy", soft image
-  is gone. No measurable fps or memory cost on the BC-250.
-- **Uneven-mip ASTC stays BC3 on AMD** unless `EDEN_NX2_UNEVEN_ASTC_RGBA8=1`. Upstream
-  (#679) kept such textures as RGBA8 on RADV: Ocarina's two 1365x1365 cube arrays (90
-  layers) became 967 MiB each and the board ran out of memory (peak GPU memory 6.9 GB).
-- **Large ASTC arrays are re-compressed a few layers at a time** (`EDEN_NX2_ASTC_CHUNK_MIB`,
-  default 64): the two 967 MiB decode images at every Kokiri Forest load are gone.
-- **Native compute storage bindings keep the 8 MiB cap** and grow only through a plausible size
-  word (upstream #1333, since v5; it replaced this fork's `EDEN_NX2_NATIVE_COMPUTE_FULL`
-  opt-in). Build 150's Mario Kart World fix (#1231) made Ocarina keep one 1 GiB buffer: peak
-  GPU memory 6.3 -> 8.7 GB, more swapping and drops, no visible change.
-- **Mesh emulation arenas start at 16 MiB** (`EDEN_NX2_MESH_ARENA_MIB`; they grow when
-  needed): Ocarina needs at most ~10 MiB a submission but kept six 64 MiB arenas (384 MiB),
-  now 64-80 MiB. `EDEN_NX2_MESH_ARENA_LOG=1` logs the usage.
-- **Freed device memory blocks are kept for reuse** (`EDEN_NX2_MEM_RESERVE_MIB`, default 256,
-  0 = off): new blocks took the kernel 10-58 ms to back while the board's RAM was full.
-  Allocations of 4 ms or more are logged.
-- **Data folder:** build 150 moves its data to `~/.local/share/lichii` and makes eden-cli
-  stop until the Qt GUI imports the old folder. This fork builds eden-cli only, so it keeps
-  the `eden` folders: saves, keys, config and shader caches stay where they are.
-- **Diagnostics:** images of 256 MiB or more (`EDEN_NX2_LARGE_IMAGE_MIB=<n>` to change) are named in the log; upstream's
-  `EDEN_NX2_STUTTER_TRACE=1` attributes every slow frame (it showed the remaining drops are
-  memory pressure: allocations and page-ins while the 16 GB board swaps, not shader builds).
-
-### 2026-11-10: baseline
-
-- **The game runs a frame ahead of the GPU threads (`EDEN_NX2_FRAMES_AHEAD=2`).** The
-  wrapper always set 2, but only `1` was parsed, so it meant 0, and `1` itself also waited
-  for the current frame whenever the GPU was behind, which on the BC-250 is every frame.
-  The game, the GPU threads and the GPU never overlapped. Kokiri Forest walk: 13.6 -> 21.3
-  fps (same binary). Upstream made Ocarina wait for each frame to avoid one-frame white
-  flashes on an RTX 5080; watch for those.
-- **No more multi-second freezes every few minutes** (port of Lichii #756). Every 30 s the
-  emulator wrote cold guest memory to swap with `MADV_PAGEOUT` while holding the mmap lock,
-  stopping every guest core (audio included) for 3-15 s; it now uses `MADV_COLD`.
-- **Load spikes no longer push the game into swap as hard.** Large staging buffers are
-  sized in 8 MiB steps instead of powers of two and freed promptly: a Kokiri Forest load
-  held 1.1 GiB of mostly empty 256 MiB buffers; now ~70 MiB. Peak GPU memory 5.3 -> ~3.7-4.5 GB.
-- **GPU thread pinning on** (`pin_gpu_threads=true` in the template): the split GPU threads
-  get their own cores in the same L3 cluster, the guest cores the rest.
-- **Macro DMA reads drain the GPU back thread only when queued work can change the words**
-  (99.6% of the drains changed nothing). Replaced by upstream's #1056 since build 150.
-- **Cached task/mesh pipelines build at boot through the compute fallback** (Lichii #841).
-- **Diagnostics:** `EDEN_NX2_PIPELINE_BUILD_TRACE` lines carry wall time and thread name,
-  `EDEN_NX2_TC_LOG=<frames>`, `EDEN_NX2_VMA_DUMP=<path>` (VMA allocation map at the peak).
-
-- **Narrowed the mesh-emulation pre-dispatch barrier.** The barrier before every emulated
-  mesh draw's compute dispatch drained the entire pipeline (all graphics, compute and
-  transfer stages, all writes) — ~57 full drains per frame in Ocarina of Time, more GPU
-  cost than the dispatches themselves on an iGPU. The mesh programs read compute output,
-  DMA copies and fragment stores; the barrier now covers exactly those sources.
-  `EDEN_NX2_MESH_WIDE_BARRIER=1` restores the wide form.
-- **Empty emulated draws are skipped before doing work.** The game culls on the GPU and
-  hands ~12% of emulated draws zero groups; each one still paid three staging requests,
-  a render-pass break and a pass restart around a no-op. They now return before any of it.
-- **PR #573 AMD performance fixes, ported and RADV-gated.** Upstream gates every fix on
-   AMD's proprietary Windows driver; the BC-250 runs RADV (`VK_DRIVER_ID_MESA_RADV`), so
-   they never fired there. This fork extends the gates (see below).
-- **BC-250 installer and Steam shortcut helper** (`tools/bc250/`): distrobox build, tuned
-  wrapper and per-game config template, and a safe binary `shortcuts.vdf` writer.
-
-## What this fork adds on top of upstream `nx2`
-
-1. **PR #573 AMD performance fixes, ported and RADV-gated.** Upstream gates every fix on
-   AMD's proprietary Windows driver; the BC-250 runs RADV (`VK_DRIVER_ID_MESA_RADV`), so
-   they never fired there. This fork extends the gates:
-   - Query-cache copies no longer block on slots where no query ended (9 -> 22 fps on the
-     PR author's 9070 XT; removes the occlusion-culling stalls OoT suffers from). Since build
-     150 this is upstream's wait-on-last copy (#679), which this fork extends to RADV, plus
-     a non-blocking host read of query results on RADV.
-   - Already-satisfied semaphore acquires skip the split-GPU-thread drain (73% of ~2800/s
-     acquires in Kokiri Forest).
-   - Native submission budget of 512 draws on RADV.
-   - Large texture unswizzles split over helper threads.
-   - The Kokiri Forest compute shader builds unoptimized (1.3-4 s stalls on AMD).
-   - Async draw discard defaults on for RADV (new pipelines no longer freeze the game).
-2. Based on upstream `nx2` including the merged **task/mesh fallback** (PR #569), plus this
-   fork's narrower pre-dispatch barrier, empty-draw skip and smaller arenas: the
-   BC-250's GPU lacks `VK_EXT_mesh_shader`, so without it OoT's foliage, building walls and
-   other task/mesh geometry is skipped entirely. With it, the missing geometry renders
-   correctly (verified on hardware).
-
-## Building
-
-Tested on Fedora 42 with clang; CLI only (no Qt):
-
-```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_QT=OFF -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF \
-  -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF \
-  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-cmake --build build --target eden-cli
-```
-
-`src/audio_core/out/` must be present (it is in this branch's history; it is gitignored in
-some upstream source exports, and the build fails without it).
-
-## Runtime notes for the BC-250
-
-- Firmware and keys go where upstream expects them (`~/.local/share/eden/keys`,
-  `nand/system/Contents/registered/<ncaid>/00`). You must dump these from your own console.
-- The built-in **Dynamic FPS** add-on makes game speed follow wall-clock time, so movement
-  stays console-speed below 30 fps; disable it in Add-Ons if you prefer frame-locked timing
-  (game then runs slow-motion under 30 fps).
-- The built-in **Max Resolution** add-on renders the scene at full 1080p (on in the
-  template). Without it the game draws a smaller image and upscales it, which looks soft on a
-  TV; on the BC-250 it costs no measurable fps.
-- FSR3 frame generation (`frame_gen`, type `Fsr3`) works; it acts after the game presents,
-  so in-emulator frame counters do not include generated frames (the log reports both every
-  10 s). Keep `frame_gen_target_rate=0` (always 2x); a target of 60 throttles the game to 20 fps
-  (see v4 in the changelog). `frame_gen_queue_target=1` gives smoother delivery (v5).
-
-## Installation on the BC-250
-
-The console runs Bazzite (an immutable OS), so the binary is built inside a distrobox
-container and launched through a small wrapper that sets the tuning for this iGPU.
-
-```sh
-git clone https://github.com/lethevimlet/lichii-bc250.git
-cd lichii-bc250
-./tools/bc250/bc250-install.sh --with-shortcut --game "<path to your Ocarina of Time dump>"
-```
-
-That creates the `lichii-bc250-build` Fedora 42 container, installs the build dependencies in
-it, builds `eden-cli`, installs the wrapper to `~/Applications/lichii-bc250/lichii-bc250` with the
-tuning in the wrapper and a per-game config template (`oot.ini`), and — with
-`--with-shortcut` — registers the game as a Steam non-Steam shortcut so it launches from
-Gaming Mode with a controller. The shortcut step needs Steam stopped (the installer tells
-you when); the installer never starts or stops Steam for you.
-
-The manual launch, if you prefer no shortcut:
-
-```sh
-~/Applications/lichii-bc250/lichii-bc250 -f -c ~/Applications/lichii-bc250/oot.ini \
-  -g "<path to your Ocarina of Time dump>"
-```
-
-### First launch: 3-5 minutes of black screen
-
-The first boot of the game stays on a **black screen for 3-5 minutes** while the shader
-pipelines are prepared. This is normal, happens once per game version per emulator build,
-and shrinks on later boots as the cache fills. The same applies in smaller form to the
-first minutes of each new area in a session: first-visit content compiles its pipelines
-once (a hitch), and the cost decays session by session. This is the single most common
-"it's broken" report — it isn't; wait it out the first time.
-
-### Shader caches
-
-The pipeline cache lives in `~/.cache/eden/shader/<title id lowercase>/` (for Ocarina of
-Time: `~/.cache/eden/shader/0400486024dec000/`). Caches from other builds of the same
-lineage are picked up when the format version and magic match, and files from other
-versions are ignored safely. A pre-warmed cache removes most of the first-boot wait
-above; it does **not** raise steady-state performance. The GPU driver keeps its own
-binary cache separately, which rebuilds on first run regardless.
-
-### Controllers
-
-The CLI frontend does not auto-bind gamepads. The installer's `oot.ini` template ships the
-verified Xbox 360 wireless receiver mapping (the common BC-250 setup); a different pad
-needs its own `player_0_*` lines in the `[Controls]` section, or configure the pad once
-with the GUI build and copy the `[Controls]` block over. Every mapping line must carry
-`<key>\default=false` — without it the loader ignores the value.
-
-Controllers can be switched on after launch and reconnect mid-game (see the 2026-11-11
-afternoon changelog entry).
-
-### Achieving the measured performance
-
-The numbers below assume the installer's wrapper and template exactly: texture-cache
-budgets for the UMA split, the split GPU thread, batched fences, two-frames-ahead pacing,
-shader preloading at boot, handheld docked mode, 8 GB memory layout, GPU Fast accuracy,
-async shaders and presentation, FSR scaling filter with 60% sharpening, FSR3 frame
-generation at 2x capped at 30, Dynamic FPS on (console-speed movement at any frame rate)
-and Max Resolution on (full 1080p scene). If any of
-those are changed, expect different results.
-
-## Reference console configuration
-
-The performance above was measured with this hardware and tuning (the numbers assume the
-installer's wrapper and config *plus* these settings):
-
-| Setting | Value |
-|---|---|
-| Memory | 16 GB total; **UMA carve-out 512 MB** (~15.2 GB system RAM) |
-| Swap | zram plus a disk swapfile; **`vm.swappiness=10`** (Bazzite's default is 180) |
-| CPU | All 8 cores enabled (stock boots with 6) |
-| GPU compute units | 40 (all WGPs routed) |
-| GPU clocks | 500–2000 MHz governor range (stock caps at 1850) |
-
-Notes:
-- The small carve-out is the biggest single lever: the game's guest memory plus the
-  texture cache does not fit in the stock 6 GB carve-out alongside the OS, and the
-  emulator OOM-kills. The GPU spills into shared memory, which this workload tolerates
-  well; it used ~330 MB of a 1024 MB carve-out, so 512 MB gives the system 0.5 GB more.
-- Memory is still the limit: the emulator holds ~7 GB of RAM plus 3.5-4.5 GB of GPU memory.
-  With swappiness 180 the kernel swapped game memory out with 1 GB of RAM still free, and
-  touching it again cost seconds at 1-17 fps. `/etc/sysctl.d/99-bc250-swappiness.conf`
-  with `vm.swappiness = 10` keeps it in RAM and drops file cache first.
-- 2000 MHz over the stock 1850 is stable for emulation on this box, but it is outside the
-  image's default for a reason: watch your temperatures. If yours runs hotter, drop back
-  to 1850.
-- The GPU's minimum 500 MHz saves ~10 W at idle and does not affect load performance.
-
-## Matching the reference setup, step by step
-
-The emulator build and its launcher come from the installer (above). These are the system
-changes outside the emulator that the reference console has. Run them on the BC-250 itself;
-the ones with `sudo` need your password. Each step says how to check it.
-
-1. **UMA carve-out 512 MB.** The carve-out lives in the board's CMOS, not on the disk, so it
-   survives OS reinstalls and needs a reboot to apply. With
-   [bc250_memcfg](https://github.com/fanoush/bc250_memcfg) (build it from source):
+1. **Give the system more RAM: UMA carve-out 512 MB.** The BC-250 reserves part of its 16 GB
+   for the GPU; the stock reservation leaves too little for the game. The setting lives in the
+   board's CMOS (it survives OS reinstalls) and is written with
+   [bc250_memcfg](https://github.com/fanoush/bc250_memcfg) (build it from source as its README
+   says):
 
    ```sh
-   sudo bc250memcfg UMA_SIZE 512     # written now, used from the next boot
+   sudo bc250memcfg UMA_SIZE 512
    sudo systemctl reboot
    ```
 
-   Check: `cat /sys/class/drm/card1/device/mem_info_vram_total` shows `536870912`, and
-   `free -m` shows about 15 GB of RAM. (Your card may be `card0`.)
+   **Check:** `free -m` shows about 15 GB of total memory, and
+   `cat /sys/class/drm/card*/device/mem_info_vram_total` shows `536870912`.
 
-2. **Swap: zram plus a disk swapfile.** Bazzite already sets up zram (compressed swap in
-   RAM). Add a disk swapfile as a safety net so a long session can't run out of memory
-   outright. On Bazzite `/var` is btrfs, and btrfs needs a dedicated subvolume for a
-   swapfile:
+2. **Stop the system from swapping the game out early: swappiness 10.** Bazzite ships
+   `vm.swappiness=180`, which on this board pushes the game's memory to swap while RAM is still
+   free and causes multi-second freezes. The file name must sort after Bazzite's
+   `/usr/lib/sysctl.d/65-memory.conf`:
+
+   ```sh
+   printf 'vm.swappiness = 10\n' | sudo tee /etc/sysctl.d/99-bc250-swappiness.conf
+   sudo sysctl --system
+   ```
+
+   **Check:** `cat /proc/sys/vm/swappiness` shows `10`, also after a reboot.
+
+3. **Add a disk swapfile as a safety net.** Bazzite already has zram (compressed swap in RAM);
+   a 16 GB swapfile on disk keeps a long session from running out of memory outright. `/var` is
+   btrfs, which needs its own subvolume for a swapfile:
 
    ```sh
    sudo btrfs subvolume create /var/swap
@@ -432,69 +87,185 @@ the ones with `sudo` need your password. Each step says how to check it.
    echo '/var/swap/swapfile none swap defaults,pri=10 0 0' | sudo tee -a /etc/fstab
    ```
 
-   Priority 10 keeps zram (priority 100) in use first; the disk is only touched once zram
-   is full. Check: `swapon --show` lists both.
+   **Check:** `swapon --show` lists zram (priority 100) and the swapfile (priority 10).
 
-3. **Swappiness 10.** This is the setting that removed most of the multi-second drops.
-   Bazzite ships `vm.swappiness=180` (good for zram on a desktop), which on this board
-   pushed the game's own memory out to swap while RAM was still free; touching that memory
-   again stalled the game for seconds. At 10 the kernel drops file cache first and keeps
-   the game in RAM:
-
-   ```sh
-   printf 'vm.swappiness = 10\n' | sudo tee /etc/sysctl.d/99-bc250-swappiness.conf
-   sudo sysctl --system
-   ```
-
-   The file name must sort after Bazzite's `/usr/lib/sysctl.d/65-memory.conf`, which sets
-   180. Check: `cat /proc/sys/vm/swappiness` shows `10`, also after a reboot.
-
-4. **8 CPU cores, 40 compute units, GPU clock range 500-2000 MHz.** See the table above;
-   the BC-250 community tools (core/CU unlock, the image's `cyan-skillfish-governor-smu`
-   config) set these. The core unlock is undone by a cold boot (power cut) and needs a warm
-   reboot to apply. Check: `nproc` shows `16`.
-
-5. **Optional: larger kernel GPU-memory (GTT) limit.** The reference console boots with
-   `ttm.pages_limit=3145728 ttm.page_pool_size=3145728` (12 GB) because another program on
-   it needed more. Ocarina's GPU memory peaks at about 6.5 GB during an area load, under the
-   default limit (half of RAM, ~7.5 GB) but close to it, so this is recommended:
+4. **Optional: a larger GPU memory limit.** The game's GPU memory peaks around 5 GB during an
+   area load, under the kernel's default limit (half of RAM) but not by much:
 
    ```sh
    sudo rpm-ostree kargs --append-if-missing=ttm.pages_limit=3145728 \
        --append-if-missing=ttm.page_pool_size=3145728
+   sudo systemctl reboot
    ```
 
-6. **Connect the controller before you start the game.** The emulator only picks up the
-   pad that is connected at launch; plug in or pair the Xbox 360 receiver first, or the
-   game will get no input.
+   **Check:** `cat /proc/cmdline` contains `ttm.pages_limit=3145728`.
+
+5. **Optional: all 8 CPU cores, 40 GPU compute units, GPU clock 500-2000 MHz.** The reference
+   console uses these (set with the BC-250 community tools and the image's
+   `cyan-skillfish-governor-smu` config). They help a little; the steps above matter more.
+   2000 MHz is above the image's default of 1850: watch your temperatures.
+
+   **Check:** `nproc` shows `16` with all 8 cores.
+
+### Step 2: put your keys and firmware in place
+
+Dump them from your own console, then copy them where the emulator expects them:
+
+- keys: `~/.local/share/eden/keys/` (`prod.keys`, `title.keys`);
+- firmware: `~/.local/share/eden/nand/system/Contents/registered/`.
+
+**Check:** both folders exist and are not empty.
+
+### Step 3: install
+
+```sh
+git clone https://github.com/lethevimlet/lichii-bc250.git
+cd lichii-bc250
+./tools/bc250/bc250-install.sh --pgo
+```
+
+This takes 30-60 minutes the first time (later updates are faster). It:
+
+1. creates a Fedora 42 container called `lichii-bc250-build` (Bazzite's own system stays
+   untouched) and installs the build tools in it;
+2. with `--pgo`, downloads LLVM 23 once (~2 GB, of which ~600 MB is kept in
+   `~/.local/share/lichii-bc250/llvm23`) and builds with Lichii's performance profile, which is
+   about 10% faster. Leave `--pgo` out to build with the container's own compiler instead;
+3. builds the emulator (`eden-cli`, no desktop GUI);
+4. installs the launcher `~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250
+   tuning, and the game settings `~/Applications/lichii-bc250/oot.ini` (frame generation, the
+   presentation queue, the Xbox 360 controller mapping, and so on).
+
+**Check:** the installer ends with `Installed.` and the launch command.
+
+### Step 4: add the game to Steam (optional)
+
+To start the game from Gaming Mode with a controller, register it as a non-Steam game. Steam
+must be closed for this (it rewrites its shortcut file otherwise): switch to Desktop Mode, quit
+Steam, then run:
+
+```sh
+./tools/bc250/bc250-install.sh --pgo --with-shortcut --game "/path/to/your/Ocarina of Time dump"
+```
+
+The second run reuses the finished build and only adds the shortcut. Start Steam again: the game
+is in your library under **Non-Steam**.
+
+Without Steam, launch it directly:
+
+```sh
+~/Applications/lichii-bc250/lichii-bc250 -f -c ~/Applications/lichii-bc250/oot.ini \
+  -g "/path/to/your/Ocarina of Time dump"
+```
+
+**Check:** the game starts (see step 5 for the first boot).
+
+### Step 5: the first launch
+
+- **Connect the controller before you start the game** (an Xbox 360 wireless receiver is the
+  tested setup). It also reconnects if it drops out mid-game.
+- **The first boot stays black for 3-5 minutes** while the shader pipelines are prepared. This
+  is normal and happens once per game version and emulator build; later boots are much faster.
+  New areas hitch a little the first time you visit them, for the same reason.
+- **The first minute in each area is rougher** than the rest (see "How it plays").
+
+## Updating
+
+```sh
+cd lichii-bc250
+git pull
+./tools/bc250/bc250-install.sh --pgo
+```
+
+Your `oot.ini` is kept (controls and your own changes), but the installer brings its frame
+generation settings up to date. A Steam shortcut made earlier keeps working.
+
+## Settings worth knowing
+
+All of these are in `oot.ini`; every value needs its `<key>\default=false` line next to it, or
+the emulator ignores it.
+
+- **Frame generation** (`frame_gen=true`, FSR3, multiplier 2, `frame_gen_target_rate=0`): one
+  generated frame between every two game frames, ~60 fps on screen from a ~30 fps game.
+  Don't set the target rate to 60: the emulator then generates two frames per game frame and
+  the game slows to 20 fps.
+- **Presentation queue** (`frame_gen_queue_target=1`): four frames waiting for the TV instead of
+  three, which smooths delivery. `0` goes back to three.
+- **Max Resolution add-on** (on): renders the scene at full 1080p. Without it the image is
+  smaller and upscaled, which looks soft on a TV; it costs no measurable fps here.
+- **Dynamic FPS add-on** (on): keeps the game at normal speed when the frame rate dips. Without
+  it the game runs in slow motion below 30 fps.
+- **Controllers:** the template carries the Xbox 360 receiver mapping. A different pad needs its
+  own `player_0_*` lines in `[Controls]` (or configure it once in a GUI build and copy the
+  block over).
+- **Shader cache:** `~/.cache/eden/shader/0400486024dec000/` for Ocarina of Time. A cache from
+  an earlier run shortens the first boot; it does not change frame rates.
+
+## Reference console
+
+The numbers above were measured on this setup (step 1 with all the optional items):
+
+| Setting | Value |
+|---|---|
+| OS | Bazzite (62fixolab BC-250 image), Gaming Mode at 1920x1080 |
+| Memory | 16 GB total, UMA carve-out 512 MB (~15.2 GB system RAM) |
+| Swap | zram (zstd) plus a 16 GB disk swapfile, `vm.swappiness=10` |
+| CPU | 8 cores / 16 threads (stock boots with 6 cores) |
+| GPU | 40 compute units, governor 500-2000 MHz |
+| GPU memory limit | `ttm.pages_limit=3145728` (12 GB) |
 
 Things that made no difference on this board, so you can skip them: a lower internal
-resolution or a smaller texture cache budget (memory and fps stay the same), pinning the
-GPU clock to maximum (the GPU is not the limit), and the newer Fritchii v5 builds (they
-are tuned for desktop GPUs with their own memory and run slower here, with frame
-generation disabled), even though some of their individual changes were worth
-porting). Also tested on 2026-11-11 and left out: `lz4` instead of `zstd` for zram (it
-compresses less, so the same swapped data takes more RAM: slow frames on the walk went from
-6 to 10 and the worst from ~150 ms to over 300 ms), a smaller texture cache budget
-(2.5/3 GiB: no change), and Fritchii's JIT warm-up (+600 MB RAM, one boot hang in four runs).
+resolution or a smaller texture cache budget, pinning the GPU clock to maximum, `lz4` instead of
+`zstd` for zram (worse: it compresses less), the Fritchii v5 builds (tuned for desktop GPUs,
+slower here), and Mailbox or FIFO-relaxed present modes.
 
-## Verified on hardware (BC-250, RADV GFX1013)
+## What this fork changes
 
-- Foliage and building walls render (mesh fallback); no white holes.
-- World frame rate ~25 fps walking straight through Kokiri Forest for 30 s (build 150 base;
-  ~23.5 on the previous base, ~12-14 before the frames-ahead fix), console-speed gameplay via
-  Dynamic FPS; frame generation doubles the presented rate (about 45-50 shown while walking,
-  60 in menus) at no cost to the world rate.
-- Remaining: short dips after area loads. An area load fills the 16 GB of shared memory
-  (guest memory ~5 GB, emulator ~2-3 GB, GPU ~6.5 GB at the peak) and the kernel swaps; the
-  page-ins and slow GPU allocations that follow cause most of the drops that are left.
-  A recorded play session (2026-11-11) tied every drop the owner noticed (camera turns,
-  climbing, throwing a stone) to a burst of swap traffic while new textures streamed in;
-  between them the game ran 32-36 fps with swap idle. Shader compilation played no part.
-- Where the emulator's own memory goes (heaptrack and /proc/PID/smaps, mid-walk): ~1.8 GB
-  resident plus ~1.7 GB swapped. The largest part is the CPU emulator: ~580 MB of translated
-  game code and ~275 MB of its bookkeeping, kept separately for each of the 6 emulated cores.
-  Sharing translated code between cores would be the next big memory saving; it needs a deep
-  change in dynarmic and has not been attempted. About 660 MB of the game's resident memory
-  holds only zeros; there is no race-free way on Linux to release it (Lichii's trim is
-  Windows-only).
+<details>
+<summary>Technical summary (details per version in CHANGELOG.md)</summary>
+
+1. **AMD performance fixes from Lichii PR #573, extended to RADV.** Upstream only enabled them
+   for AMD's Windows driver; the BC-250 runs Mesa's RADV:
+   - query-cache copies no longer block on slots where no query ended (removes Ocarina's
+     occlusion-culling stalls); since build 150 this is upstream's wait-on-last copy (#679),
+     extended to RADV, plus a non-blocking host read of query results;
+   - already-satisfied semaphore acquires skip the split GPU thread's drain;
+   - native submission budget of 512 draws on RADV;
+   - large texture unswizzles split over helper threads;
+   - the Kokiri Forest compute shader builds unoptimized (1.3-4 s stalls on AMD otherwise);
+   - async draw discard defaults on for RADV (new pipelines no longer freeze the game).
+2. **Task/mesh shader fallback** (upstream PR #569) with a narrower barrier, empty-draw skip and
+   smaller arenas: the BC-250's GPU has no `VK_EXT_mesh_shader`, so without it Ocarina's foliage
+   and building walls are missing.
+3. **Memory work for a 16 GB shared-memory board:** staging buffers in 8 MiB steps, ASTC
+   textures re-compressed a few layers at a time, a texture cache that keeps recently used
+   textures, capped compute bindings, smaller mesh arenas, `MADV_COLD` instead of
+   `MADV_PAGEOUT`.
+4. **Frame pacing:** the game runs two frames ahead of the GPU threads, GPU threads pinned to
+   their own cores, frame generation always 2x with a four-frame presentation queue.
+5. **Containers:** controllers reconnect inside the distrobox (SDL uses inotify instead of
+   udev there).
+6. **Diagnostics** (all off unless their variable is set): stutter trace, GPU thread profile, a
+   Chrome-trace timeline of the GPU threads (`EDEN_NX2_TIMELINE`), on-screen repeat counts in the
+   log, GPU memory peak dumps, command-list round-trip timing.
+
+</details>
+
+## Building by hand
+
+The installer is the supported path. To build without it (tested on Fedora 42 with clang;
+`src/audio_core/out/` must be present):
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_QT=OFF -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF \
+  -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build --target eden-cli --parallel 4
+```
+
+For the PGO build by hand, see "Building with PGO" in [CHANGELOG.md](CHANGELOG.md#building-with-pgo).
+
+**Base:** Lichii `nx2` build 150 (`17baed716d`) plus selected build 160 commits and this fork's
+changes. Data stays in the Eden folders (`~/.local/share/eden`, `~/.config/eden`,
+`~/.cache/eden`).
