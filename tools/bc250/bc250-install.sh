@@ -111,6 +111,8 @@ print(r["tag_name"], a[tgz[0]], a.get(tgz[0] + ".sha256", ""))
     mv "$tmp/lichii-bc250" "$APP_DIR/lichii"
     rm -rf "$APP_DIR/lichii.old"
     EDEN_EXEC="$APP_DIR/lichii/eden-cli"
+    GUI_EXEC=""
+    [ -x "$APP_DIR/lichii/usr/bin/lichii" ] && GUI_EXEC="$APP_DIR/lichii/usr/bin/lichii"
     # A piped install (curl | bash) has no checkout; the package carries the helper scripts.
     REPO_DIR_TOOLS="$APP_DIR/lichii/tools"
     log "installed $TAG to $APP_DIR/lichii"
@@ -195,6 +197,7 @@ cmake --build "$BUILD_DIR" --target eden-cli --parallel 4
 [ -x "$BUILD_DIR/bin/eden-cli" ] || { echo "build failed: no eden-cli" >&2; exit 1; }
 log "built $BUILD_DIR/bin/eden-cli"
 EDEN_EXEC="$BUILD_DIR/bin/eden-cli"
+GUI_EXEC=""   # --build compiles eden-cli only; the GUI comes with the release package
 fi
 
 # --- 3. Wrapper and config ----------------------------------------------------
@@ -204,9 +207,13 @@ mkdir -p "$APP_DIR"
 cat > "$APP_DIR/lichii-bc250" <<'WRAP'
 #!/usr/bin/env bash
 # lichii-bc250 launcher: tunes the emulator for the BC-250 iGPU, then runs eden-cli.
-# Usage: lichii-bc250 [-f] -g "<path to your game dump>"
+# Usage: lichii-bc250 [-f] -c <config.ini> -g "<path to your game dump>"
+#        lichii-bc250 --gui      the Lichii GUI (settings, controller mapping, game list)
+# A controller mapped in the GUI is copied into the -c config before the game starts.
 set -euo pipefail
 EDEN_EXEC="__EDEN_EXEC__"
+GUI_EXEC="__GUI_EXEC__"
+APP_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 unset LD_PRELOAD
 # The BC-250 iGPU (RADV) with UMA: cap the texture cache so it never tramples
 # the 15 GB of system RAM the game and the compositor also live in. 1.5/2 GB (v6) left
@@ -228,11 +235,55 @@ export EDEN_NX2_PIPELINE_WORKERS=4 EDEN_NX2_PIPELINE_DRIVER_THREADS=2 EDEN_NX2_I
 # advertise VK_EXT_mesh_shader anyway; native task/mesh draws then render white. Keep the
 # emulator's own compute fallback, which is what stock Mesa uses.
 export EDEN_NX2_FORCE_MESH_FALLBACK=1
+# Steam's shader pre-cache layer records every pipeline the emulator builds into
+# ~/.local/share/Steam/steamapps/shadercache/<id>/fozpipelinesv6: it never stops growing (42 GB on
+# the BC-250 in one day of play and tests, until the disk was full) and nothing ever uses it.
+export DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1
+if [ "${1:-}" = --gui ]; then
+    shift
+    if [ -z "$GUI_EXEC" ]; then
+        echo "This install has no GUI (--build compiles eden-cli only); install a release package for it." >&2
+        exit 1
+    fi
+    EDEN_EXEC="$GUI_EXEC"
+else
+    config="" prev=""
+    for arg in "$@"; do
+        [ "$prev" = -c ] && config="$arg"
+        prev="$arg"
+    done
+    if [ -n "$config" ] && [ -f "$APP_DIR/import_gui_controls.py" ] && command -v python3 >/dev/null; then
+        python3 "$APP_DIR/import_gui_controls.py" "$config" || true
+    fi
+fi
 exec "$EDEN_EXEC" "$@"
 WRAP
-sed -i "s|__EDEN_EXEC__|$EDEN_EXEC|" "$APP_DIR/lichii-bc250"
+sed -i -e "s|__EDEN_EXEC__|$EDEN_EXEC|" -e "s|__GUI_EXEC__|${GUI_EXEC:-}|" "$APP_DIR/lichii-bc250"
 chmod +x "$APP_DIR/lichii-bc250"
+# (release packages before v11 don't carry the helper; a checkout does)
+for src in "$REPO_DIR_TOOLS/import_gui_controls.py" "$REPO_DIR/tools/bc250/import_gui_controls.py"; do
+    if [ -f "$src" ]; then cp "$src" "$APP_DIR/import_gui_controls.py"; break; fi
+done
 
+# A menu entry for the GUI (Desktop Mode): settings, controller mapping, game list.
+if [ -n "${GUI_EXEC:-}" ]; then
+    mkdir -p "$HOME/.local/share/applications"
+    cat > "$HOME/.local/share/applications/lichii-bc250.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Lichii BC-250
+Comment=Emulator settings and controller mapping (the Steam shortcut uses them)
+Exec=$APP_DIR/lichii-bc250 --gui
+Icon=applications-games
+Categories=Game;Emulator;
+Terminal=false
+DESKTOP
+fi
+
+if [ ! -f "$APP_DIR/oot.ini" ] && [ -f "$HOME/.config/lichii-bc250/oot.ini" ]; then
+    log "restoring your game config (controls) kept by the uninstaller"
+    cp -p "$HOME/.config/lichii-bc250/oot.ini" "$APP_DIR/oot.ini"
+fi
 if [ ! -f "$APP_DIR/oot.ini" ]; then
     log "writing the per-game config template ($APP_DIR/oot.ini)"
     cat > "$APP_DIR/oot.ini" <<'INI'
@@ -1098,7 +1149,11 @@ INI
 else
     # Keep the user's file (controls, their own changes) but bring the tuned frame
     # generation settings up to date: v4 always 2x, v5 a 4-frame presentation queue.
-    log "keeping the existing $APP_DIR/oot.ini; updating its frame generation settings"
+    backup="$APP_DIR/oot.ini.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$APP_DIR/oot.ini" "$backup"
+    ls -1t "$APP_DIR"/oot.ini.bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f   # keep the last 5
+    log "keeping the existing $APP_DIR/oot.ini (controls and your own changes; copy in $backup);"
+    log "updating only its frame generation settings"
     for kv in frame_gen=true frame_gen_type=1 frame_gen_multiplier=2 frame_gen_target_rate=0 \
               frame_gen_queue_target=1; do
         key=${kv%%=*}

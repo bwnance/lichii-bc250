@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v7
+# lichii-bc250 v12
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -21,9 +21,11 @@ All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; thi
 carries the BC-250-specific changes on top. GPLv3, like upstream. The repository was called
 `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
-**What's new:** see [CHANGELOG.md](CHANGELOG.md). In short, v7 shortens the freezes when you enter
-big areas, uses ~400 MB less GPU memory, and ships as a ready-made download: the installer no
-longer has to compile anything (and there is an uninstaller).
+**What's new:** see [CHANGELOG.md](CHANGELOG.md). v10 fixes missing or white/yellow foliage on
+systems whose GPU driver offers mesh shaders it then refuses to build (reported on CachyOS), and
+lets any gamepad play when the game isn't started from Steam. v9 cut about 500 MB of RAM. v8 made open areas like Hyrule
+Field smoother (about 40 % fewer dropped frames) with 14 upstream Lichii speed-ups, without the
+castle-entry regression of the newest upstream builds. (Upstream's installer runs it in a small container on Bazzite; this fork runs it natively.)
 
 ## How it plays
 
@@ -156,6 +158,22 @@ and survive its updates.
    udev rules leave out their hidraw node (045E:02E0), so under Steam Input the buttons work but
    the sticks don't. The installer adds a rule for it.
 
+10. **Optional: a safety net against total freezes.** If a very long session still runs out of
+   memory, Linux keeps swapping instead of closing anything, and the console can stop responding
+   until it is powered off. systemd-oomd (already running on Bazzite) can close the game instead
+   once memory pressure stays above 80% for 20 s; normal play, even with heavy swapping, stays far
+   below that:
+
+   ```sh
+   printf '[Service]\nManagedOOMMemoryPressure=kill\nManagedOOMMemoryPressureLimit=80%%\nManagedOOMMemoryPressureDurationSec=20s\n' > /tmp/oomd.conf
+   sudo mkdir -p /etc/systemd/system/user@.service.d
+   sudo install -m 644 /tmp/oomd.conf /etc/systemd/system/user@.service.d/99-bc250-oomd.conf
+   sudo systemctl daemon-reload
+   ```
+
+   **Check:** `oomctl` lists `/user.slice/user-1000.slice/user@1000.service` under "Memory Pressure
+   Monitored CGroups".
+
 ### Step 2: put your keys and firmware in place
 
 Dump them from your own console, then copy them where the emulator expects them:
@@ -180,7 +198,18 @@ Ubuntu 24.04; it runs on CachyOS and Bazzite and uses the system's own GPU drive
 to `~/Applications/lichii-bc250/lichii`, and installs the launcher
 `~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250 tuning, plus the game settings
 `~/Applications/lichii-bc250/oot.ini` (frame generation, the presentation queue, the Xbox 360
-controller mapping, and so on). `--release v7` picks a specific release.
+controller mapping, and so on). `--release v8` picks a specific release.
+
+The emulator runs directly on the system; this fork does not use the `lichii-bc250-runtime`
+container from upstream (which saves about 1.4 GB of RAM on Bazzite).
+
+Installer options:
+
+| Option | What it does |
+|---|---|
+| `--release <tag>` | Installs a specific release, for example `--release v8` (default: the latest). |
+| `--build [--pgo]` | Compiles the emulator yourself instead of downloading it (see below). |
+| `--with-shortcut --game <path>` | Also adds a Steam shortcut for your dump (step 4). |
 
 **Build it yourself instead** (30-60 minutes the first time):
 
@@ -238,18 +267,36 @@ git pull
 ```
 
 Your `oot.ini` is kept (controls and your own changes), but the installer brings its frame
-generation settings up to date. A Steam shortcut made earlier keeps working.
+generation settings up to date and saves a copy first (`oot.ini.bak-<date>`, the last five are
+kept). The uninstaller keeps it too (`~/.config/lichii-bc250/oot.ini`), and a reinstall puts it
+back. A Steam shortcut made earlier keeps working.
 
 ## Uninstalling
 
 ```sh
-./tools/bc250/bc250-uninstall.sh            # launcher, package, Steam shortcut, build container
+./tools/bc250/bc250-uninstall.sh            # launcher, package, Steam shortcut, containers
 ./tools/bc250/bc250-uninstall.sh --system   # also reverts the sysctl and zram steps (sudo)
 ```
 
 Close Steam first if you want the shortcut removed (Steam rewrites its shortcut file otherwise).
 Your saves, keys, firmware and shader caches in `~/.local/share/eden` are never touched; the disk
 swapfile and kernel arguments are left in place, and the uninstaller prints how to remove them.
+
+## The GUI
+
+The release package also carries Lichii's normal window (game list, settings, controller
+mapping). In Desktop Mode it is in the application menu as **Lichii BC-250**, or run:
+
+```sh
+~/Applications/lichii-bc250/lichii-bc250 --gui
+```
+
+It uses the same keys, firmware, saves and shader caches as the Steam shortcut. Its own settings
+live in `~/.config/eden/qt-config.ini`; the Steam shortcut keeps using `oot.ini`. One exception:
+**a controller you map in the GUI** (Emulation > Configure > Controls) is copied into `oot.ini`
+the next time the game starts from the shortcut (a copy of the old file is kept as
+`oot.ini.before-gui-controls`). Play from the shortcut for the BC-250 settings (frame
+generation, the texture cache limits and the rest of `oot.ini`).
 
 ## Settings worth knowing
 
@@ -266,9 +313,12 @@ the emulator ignores it.
   smaller and upscaled, which looks soft on a TV; it costs no measurable fps here.
 - **Dynamic FPS add-on** (on): keeps the game at normal speed when the frame rate dips. Without
   it the game runs in slow motion below 30 fps.
-- **Controllers:** the template carries the Xbox 360 receiver mapping. A different pad needs its
-  own `player_0_*` lines in `[Controls]` (or configure it once in a GUI build and copy the
-  block over).
+- **Controllers:** the template binds player 1 to Steam Input's virtual pad, which every controller
+  becomes when the game starts from Steam with Steam Input on. Started any other way (Desktop
+  Mode, a terminal), the first connected gamepad stands in for it through SDL's standard gamepad
+  layout, so any pad works without a mapping. For a custom layout, map the controller in the GUI
+  (below) or write your own `player_0_*` lines in `[Controls]`. If a pad isn't seen at all, the `Gamepad on this system:` lines at the top
+  of `eden_log.txt` say whether the emulator can open it.
 - **Shader cache:** `~/.cache/eden/shader/0400486024dec000/` for Ocarina of Time. A cache from
   an earlier run shortens the first boot; it does not change frame rates.
 

@@ -166,6 +166,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 gc_deletes{};
     u64 gc_costly_deletes{};
     u64 gc_download_deletes{}; ///< Evictions that downloaded the image first (a full GPU wait)
+    u64 gc_kept_gpu_images{}; ///< Collector skips of recent GPU-written images (v9)
     u64 fresh_render_targets{};    ///< New render targets not uploaded (last 600 frames)
     u64 render_targets_created{};  ///< Images a render target binding created (last 600 frames)
     u64 render_targets_uploaded{}; ///< Of those, loaded from guest memory
@@ -642,6 +643,8 @@ private:
     /// none for an unbacked image (too large to back, or over unwritten sparse blocks), what is
     /// bound to its layers for a SparseLayers one.
     u64 ImageMemoryBytes(const Image& image) const;
+    /// The image's allocation size where the runtime reports one, else ImageMemoryBytes.
+    u64 ImageAllocationBytes(const Image& image) const;
 
     void QueueAsyncDecode(Image& image, ImageId image_id);
     void TickAsyncDecode();

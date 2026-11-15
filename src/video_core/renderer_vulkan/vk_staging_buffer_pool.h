@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <climits>
 #include <vector>
 
@@ -133,6 +134,13 @@ private:
     size_t used_iterator = 0;
     size_t free_iterator = 0;
     std::array<u64, NUM_SYNCS> sync_ticks{};
+
+    void LogStagingStats();
+    u64 created_buffers{};
+    u64 created_bytes{};
+    u64 capped_waits{};
+    std::chrono::steady_clock::duration capped_wait_time{};
+    std::chrono::steady_clock::time_point stats_start{};
 
     StagingBuffersCache device_local_cache;
     StagingBuffersCache upload_cache;

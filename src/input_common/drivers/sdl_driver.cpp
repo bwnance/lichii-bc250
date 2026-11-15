@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <numbers>
 #include <optional>
 #include "common/logging.h"
@@ -16,6 +18,9 @@
 #include "common/vector_math.h"
 #include "input_common/drivers/sdl_driver.h"
 #include "input_common/helpers/dualsense_haptics.h"
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 namespace InputCommon {
 
@@ -660,6 +665,7 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
     std::scoped_lock lock{joystick_map_mutex};
     if (joystick_map.find(guid) == joystick_map.end()) {
         auto joystick = std::make_shared<SDLJoystick>(guid, 0, sdl_joystick, sdl_gamecontroller);
+        device_presets.insert(joystick->GetPadIdentifier());
         PreSetController(joystick->GetPadIdentifier());
         joystick->EnableMotion();
         SetBattery(joystick->GetPadIdentifier(),
@@ -683,6 +689,7 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
 
     const int port = static_cast<int>(joystick_guid_list.size());
     auto joystick = std::make_shared<SDLJoystick>(guid, port, sdl_joystick, sdl_gamecontroller);
+    device_presets.insert(joystick->GetPadIdentifier());
     PreSetController(joystick->GetPadIdentifier());
     joystick->EnableMotion();
     SetBattery(joystick->GetPadIdentifier(),
@@ -726,6 +733,132 @@ void SDLDriver::PumpEvents() {
             }
         }
     }
+}
+
+void SDLDriver::UpdateStandIn() {
+    if (!standin_dirty.exchange(false)) {
+        return;
+    }
+    std::optional<PadIdentifier> target;
+    SDL_JoystickID source = 0;
+    std::string source_name;
+    const std::vector<PadIdentifier> registered = GetPresetControllers();
+    {
+        std::scoped_lock lock{joystick_map_mutex};
+        const auto is_open = [this](const Common::UUID& guid) {
+            const auto it = joystick_map.find(guid);
+            return it != joystick_map.end() &&
+                   std::ranges::any_of(it->second, [](const auto& joystick) {
+                       return joystick->GetSDLJoystick() != nullptr;
+                   });
+        };
+        // Controllers the bindings name (registered, but not by InitJoystick for a device)
+        std::unordered_set<Common::UUID> bound;
+        for (const PadIdentifier& identifier : registered) {
+            if (!device_presets.contains(identifier)) {
+                bound.insert(identifier.guid);
+                if (!target && !is_open(identifier.guid)) {
+                    target = identifier;
+                }
+            }
+        }
+        // The first connected gamepad no binding names
+        for (const auto& [guid, joysticks] : joystick_map) {
+            if (!target || source != 0 || bound.contains(guid)) {
+                continue;
+            }
+            for (const auto& joystick : joysticks) {
+                if (joystick->GetSDLJoystick() && joystick->GetSDLGameController()) {
+                    source = SDL_GetJoystickID(joystick->GetSDLJoystick());
+                    source_name = joystick->GetControllerName();
+                    break;
+                }
+            }
+        }
+    }
+    const bool changed = source != standin_source || target != standin_target;
+    if (source == 0) {
+        target.reset();
+    }
+    if (changed) {
+        if (target) {
+            PreSetController(*target);
+            LOG_INFO(Input,
+                     "No connected controller matches the bound one ({}); \"{}\" stands in for "
+                     "it through SDL's gamepad layout",
+                     target->guid.RawString(), source_name);
+        } else if (standin_target) {
+            LOG_INFO(Input, "Stand-in controller released");
+        }
+        standin_hat = 0;
+    }
+    standin_source = source;
+    standin_target = target;
+}
+
+void SDLDriver::HandleStandInEvent(const SDL_Event& event) {
+    if (!standin_target) {
+        // Bindings can be made after the first event: look again (once a second) while nothing
+        // stands in
+        const auto now = std::chrono::steady_clock::now();
+        if (now - standin_checked >= std::chrono::seconds{1}) {
+            standin_checked = now;
+            standin_dirty = true;
+        }
+    }
+    UpdateStandIn();
+    if (!standin_target) {
+        return;
+    }
+    const PadIdentifier& target = *standin_target;
+    if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+        if (event.gaxis.which != standin_source) {
+            return;
+        }
+        // The raw axes of the bound layout (Steam Input's virtual pad, an XInput layout)
+        int axis = -1;
+        switch (static_cast<SDL_GamepadAxis>(event.gaxis.axis)) {
+        case SDL_GAMEPAD_AXIS_LEFTX: axis = 0; break;
+        case SDL_GAMEPAD_AXIS_LEFTY: axis = 1; break;
+        case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: axis = 2; break;
+        case SDL_GAMEPAD_AXIS_RIGHTX: axis = 3; break;
+        case SDL_GAMEPAD_AXIS_RIGHTY: axis = 4; break;
+        case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: axis = 5; break;
+        default: return;
+        }
+        SetAxis(target, axis, event.gaxis.value / 32767.0f);
+        return;
+    }
+    if (event.gbutton.which != standin_source) {
+        return;
+    }
+    const bool down = event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+    u8 hat_bit = 0;
+    int button = -1;
+    switch (static_cast<SDL_GamepadButton>(event.gbutton.button)) {
+    case SDL_GAMEPAD_BUTTON_SOUTH: button = 0; break;
+    case SDL_GAMEPAD_BUTTON_EAST: button = 1; break;
+    case SDL_GAMEPAD_BUTTON_WEST: button = 2; break;
+    case SDL_GAMEPAD_BUTTON_NORTH: button = 3; break;
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: button = 4; break;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: button = 5; break;
+    case SDL_GAMEPAD_BUTTON_BACK: button = 6; break;
+    case SDL_GAMEPAD_BUTTON_START: button = 7; break;
+    case SDL_GAMEPAD_BUTTON_GUIDE: button = 8; break;
+    case SDL_GAMEPAD_BUTTON_LEFT_STICK: button = 9; break;
+    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: button = 10; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: hat_bit = SDL_HAT_UP; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: hat_bit = SDL_HAT_RIGHT; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: hat_bit = SDL_HAT_DOWN; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: hat_bit = SDL_HAT_LEFT; break;
+    default: return;
+    }
+    if (hat_bit != 0) {
+        standin_hat = down ? (standin_hat | hat_bit) : (standin_hat & ~hat_bit);
+        SetHatButton(target, 0, standin_hat);
+        return;
+    }
+    SetButton(target, button, down);
 }
 
 void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
@@ -782,10 +915,20 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
     case SDL_EVENT_JOYSTICK_REMOVED:
         LOG_INFO(Input, "Controller removed with Instance_ID {}", event.jdevice.which);
         CloseJoystick(SDL_GetJoystickFromID(event.jdevice.which));
+        standin_dirty = true;
         break;
     case SDL_EVENT_JOYSTICK_ADDED:
-        LOG_INFO(Input, "Controller connected with device index {}", event.jdevice.which);
+        LOG_INFO(Input, "Controller connected with device index {}: \"{}\"", event.jdevice.which,
+                 SDL_GetJoystickNameForID(event.jdevice.which)
+                     ? SDL_GetJoystickNameForID(event.jdevice.which)
+                     : "?");
         InitJoystick(event.jdevice.which);
+        standin_dirty = true;
+        break;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        HandleStandInEvent(event);
         break;
     case SDL_EVENT_AUDIO_DEVICE_REMOVED: {
         if (event.adevice.recording) {
@@ -822,6 +965,52 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
         LOG_INFO(Input, "Running in a container: using inotify for controller hotplug");
         SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "SDL_JOYSTICK_DISABLE_UDEV", "1", false);
         SDL_SetHint("SDL_JOYSTICK_DISABLE_UDEV", "1");
+    }
+    // Every gamepad the kernel knows (/sys/class/input/js*), with its IDs and whether its event and
+    // hidraw nodes can be opened from here: a controller the game doesn't see (reported with a
+    // Bluetooth 8BitDo on Bazzite, where the emulator runs in a container) shows why in the log.
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const auto read_line = [](const fs::path& path) {
+            std::ifstream file{path};
+            std::string line;
+            std::getline(file, line);
+            return line;
+        };
+        const auto access_text = [](const std::string& node) {
+            return ::access(node.c_str(), R_OK | W_OK) == 0  ? "read/write"
+                   : ::access(node.c_str(), R_OK) == 0       ? "read only"
+                   : ::access(node.c_str(), F_OK) == 0       ? "NO ACCESS"
+                                                             : "missing here";
+        };
+        size_t count = 0;
+        for (const auto& js : fs::directory_iterator{"/sys/class/input", ec}) {
+            if (js.path().filename().string().rfind("js", 0) != 0) {
+                continue;
+            }
+            const fs::path device = js.path() / "device";
+            std::string nodes;
+            for (const auto& entry : fs::directory_iterator{device, ec}) {
+                const std::string name = entry.path().filename().string();
+                if (name.rfind("event", 0) == 0) {
+                    const std::string node = "/dev/input/" + name;
+                    nodes += fmt::format(" {} {}", node, access_text(node));
+                }
+            }
+            for (const auto& entry : fs::directory_iterator{device / "device" / "hidraw", ec}) {
+                const std::string node = "/dev/" + entry.path().filename().string();
+                nodes += fmt::format(" {} {}", node, access_text(node));
+            }
+            LOG_INFO(Input, "Gamepad on this system: \"{}\" {}:{} bus {}{}",
+                     read_line(device / "name"), read_line(device / "id" / "vendor"),
+                     read_line(device / "id" / "product"), read_line(device / "id" / "bustype"),
+                     nodes);
+            ++count;
+        }
+        if (count == 0) {
+            LOG_INFO(Input, "Gamepad on this system: none found in /sys/class/input");
+        }
     }
 #endif
 

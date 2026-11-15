@@ -6,6 +6,7 @@
 
 add_executable(tests
     common/addon_config.cpp
+    common/thread_worker.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/buffer_cache_ports.cpp
     video_core/unswizzle_workers.cpp
@@ -95,6 +96,7 @@ add_executable(tests
     video_core/async_shader_emission.cpp
     video_core/oot_network.cpp
     video_core/page_filter.cpp
+    video_core/query_stream.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_storage_alignment.cpp
@@ -183,6 +185,7 @@ add_executable(tests
     common/unique_function.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
+    core/host_wait_margin.cpp
     core/nextendo_redirect.cpp
     core/thread_startup_policy.cpp
     core/nup_writer.cpp
@@ -218,6 +221,8 @@ add_executable(tests
     video_core/turing_macro_ram.cpp
     video_core/uniform_stream_reuse.cpp
     video_core/usage_tracker.cpp
+    video_core/nx2_backx.cpp
+    video_core/vertex_input_cache.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/descriptor_payload_growth.cpp
@@ -240,7 +245,7 @@ target_link_libraries(tests PRIVATE common core audio_core input_common video_co
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)
-    target_sources(tests PRIVATE core/jit_ordered_loads.cpp core/jit_warmup.cpp core/window_trace.cpp)
+    target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp core/jit_warmup.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
 

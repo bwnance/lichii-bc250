@@ -370,6 +370,99 @@ void ReportTextureMemo() {
                  hits, misses, g_memo_mismatches.load(std::memory_order_relaxed));
     }
 }
+
+/// The sTypes of a pNext chain, for the failure log
+std::string ChainTypes(const void* next) {
+    std::string types;
+    for (auto* item = static_cast<const VkBaseInStructure*>(next); item != nullptr;
+         item = item->pNext) {
+        types += fmt::format("{}{}", types.empty() ? "" : ",", static_cast<int>(item->sType));
+    }
+    return types.empty() ? "-" : types;
+}
+
+std::atomic<u32> g_failed_pipeline_logs{};
+std::atomic<u32> g_retry_logs{};
+
+/// Logs what a graphics pipeline that the driver refused asked for (first 16 failures)
+void LogFailedGraphicsPipeline(VkResult result, const VkGraphicsPipelineCreateInfo& ci,
+                               std::span<const VkDynamicState> dynamic_states) {
+    if (g_failed_pipeline_logs.fetch_add(1, std::memory_order_relaxed) >= 16) {
+        return;
+    }
+    std::string stages;
+    for (u32 index = 0; index < ci.stageCount; ++index) {
+        const VkPipelineShaderStageCreateInfo& stage = ci.pStages[index];
+        stages += fmt::format("{}{:#x}[{}]", stages.empty() ? "" : " ",
+                              static_cast<u32>(stage.stage), ChainTypes(stage.pNext));
+    }
+    std::string dynamic;
+    for (const VkDynamicState state : dynamic_states) {
+        dynamic += fmt::format("{}{}", dynamic.empty() ? "" : ",", static_cast<int>(state));
+    }
+    const auto* input_assembly = ci.pInputAssemblyState;
+    LOG_ERROR(Render_Vulkan,
+              "Driver refused a graphics pipeline ({}): flags {:#x}, stages {}, topology {}, "
+              "viewport chain {}, rasterization chain {}, multisample samples {}, color "
+              "attachments {}, dynamic states {}",
+              vk::Exception(result).what(), static_cast<u32>(ci.flags), stages,
+              input_assembly ? static_cast<int>(input_assembly->topology) : -1,
+              ChainTypes(ci.pViewportState ? ci.pViewportState->pNext : nullptr),
+              ChainTypes(ci.pRasterizationState ? ci.pRasterizationState->pNext : nullptr),
+              ci.pMultisampleState ? static_cast<int>(ci.pMultisampleState->rasterizationSamples)
+                                   : 0,
+              ci.pColorBlendState ? ci.pColorBlendState->attachmentCount : 0, dynamic);
+}
+
+/// Builds a pipeline the driver refused again: first without the pipeline cache and the
+/// pipeline-binary path, then also without the optional extension structures (stage subgroup
+/// size, depth clip control, line, conservative and provoking-vertex state) and debug flags. A
+/// pipeline that draws slightly differently beats one that never draws. Rethrows the first
+/// failure when neither works.
+vk::Pipeline RetryGraphicsPipeline(const Device& device, const VkGraphicsPipelineCreateInfo& ci,
+                                   const vk::Exception& first_failure) {
+    const auto log_success = [](const char* what) {
+        if (g_retry_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Render_Vulkan, "Graphics pipeline built on retry {}", what);
+        }
+    };
+    try {
+        vk::Pipeline result = device.GetLogical().CreateGraphicsPipeline(ci, VK_NULL_HANDLE);
+        log_success("without the pipeline cache");
+        return result;
+    } catch (const vk::Exception&) {
+    }
+    boost::container::static_vector<VkPipelineShaderStageCreateInfo, 8> stages(
+        ci.pStages, ci.pStages + ci.stageCount);
+    for (VkPipelineShaderStageCreateInfo& stage : stages) {
+        stage.pNext = nullptr;
+    }
+    VkGraphicsPipelineCreateInfo plain{ci};
+    plain.flags &= ~VkPipelineCreateFlags{VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR};
+    plain.pStages = stages.data();
+    VkPipelineViewportStateCreateInfo viewport{};
+    if (ci.pViewportState) {
+        viewport = *ci.pViewportState;
+        viewport.pNext = nullptr;
+        plain.pViewportState = &viewport;
+    }
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    if (ci.pRasterizationState) {
+        rasterization = *ci.pRasterizationState;
+        rasterization.pNext = nullptr;
+        plain.pRasterizationState = &rasterization;
+    }
+    try {
+        vk::Pipeline result = device.GetLogical().CreateGraphicsPipeline(plain, VK_NULL_HANDLE);
+        log_success("without optional extension state");
+        return result;
+    } catch (const vk::Exception& exception) {
+        if (g_retry_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_ERROR(Render_Vulkan, "Graphics pipeline retry failed too: {}", exception.what());
+        }
+    }
+    throw first_failure;
+}
 } // Anonymous namespace
 
 std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
@@ -456,35 +549,69 @@ GraphicsPipeline::GraphicsPipeline(
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         const Shader::Info& info = stage_infos[stage];
         u32& handles = handle_constant_buffers[stage];
-        for (const auto& desc : info.texture_buffer_descriptors) {
+        auto& ranges = handle_ranges[stage];
+        std::array<boost::container::small_vector<std::pair<u32, u32>, 8>,
+                   Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+            words;
+        const auto add_range = [&](u32 slot, u32 begin, u32 end) {
+            handles |= 1U << slot;
+            auto& range = ranges[slot];
+            range = range.first == range.second
+                        ? std::pair{begin, end}
+                        : std::pair{(std::min)(range.first, begin), (std::max)(range.second, end)};
+            words[slot].emplace_back(begin, end);
+        };
+        // The words read_handle reads. Handles computed at draw time neither block delta draws
+        // nor take part: ComputedHandlesChanged evaluates them again for each delta draw, from
+        // the constant buffers bound and the data in memory then.
+        const auto add = [&](const auto& desc) {
             if (desc.handle_program != ~0U) {
-                block(DeltaBlocker::ComputedHandles);
+                return;
             }
-            handles |= 1U << desc.cbuf_index;
-            if (desc.has_secondary) {
-                handles |= 1U << desc.secondary_cbuf_index;
+            // Each element's word on its own: strided arrays leave words between the handles.
+            for (u32 index = 0; index < desc.count; ++index) {
+                // Read as a storage buffer address: the texture is the null one (ConfigureImpl).
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(desc)>,
+                                             Shader::TextureDescriptor>) {
+                    if (VideoCommon::HandleIsStoragePointer(info, desc, index)) {
+                        continue;
+                    }
+                }
+                const u32 offset = desc.cbuf_offset + (index << desc.size_shift);
+                add_range(desc.cbuf_index, offset, offset + 4);
             }
+            if constexpr (requires { desc.has_secondary; }) {
+                if (desc.has_secondary) {
+                    add_range(desc.secondary_cbuf_index, desc.secondary_cbuf_offset,
+                              desc.secondary_cbuf_offset + 4);
+                }
+            }
+        };
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            add(desc);
         }
         for (const auto& desc : info.image_buffer_descriptors) {
-            if (desc.handle_program != ~0U) {
-                block(DeltaBlocker::ComputedHandles);
-            }
-            handles |= 1U << desc.cbuf_index;
+            add(desc);
         }
         for (const auto& desc : info.texture_descriptors) {
-            if (desc.handle_program != ~0U) {
-                block(DeltaBlocker::ComputedHandles);
-            }
-            handles |= 1U << desc.cbuf_index;
-            if (desc.has_secondary) {
-                handles |= 1U << desc.secondary_cbuf_index;
-            }
+            add(desc);
         }
         for (const auto& desc : info.image_descriptors) {
-            if (desc.handle_program != ~0U) {
-                block(DeltaBlocker::ComputedHandles);
+            add(desc);
+        }
+        for (u32 slot = 0; slot < words.size(); ++slot) {
+            auto& list = words[slot];
+            std::ranges::sort(list);
+            const size_t first = handle_words.size();
+            for (const auto& range : list) {
+                if (handle_words.size() != first && range.first <= handle_words.back().second) {
+                    handle_words.back().second = (std::max)(handle_words.back().second, range.second);
+                } else {
+                    handle_words.push_back(range);
+                }
             }
-            handles |= 1U << desc.cbuf_index;
+            handle_word_index[stage][slot] = {static_cast<u16>(first),
+                                              static_cast<u16>(handle_words.size() - first)};
         }
     }
 
@@ -642,9 +769,19 @@ GraphicsPipeline::GraphicsPipeline(
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
         // of each one's SPIR-V while it lives (title 1: ~1,500 pipelines, 2-5 modules each).
         // Its SPIR-V is kept compressed (about a tenth of it), so that an evicted pipeline is
-        // built again without translating its shaders.
+        // built again without translating its shaders. BC-250: only with EDEN_NX2_KEEP_SPIRV=1.
+        // On a 16 GB console few pipelines are ever evicted, and OoT's ~7,600 pipelines kept
+        // ~310 MiB of compressed SPIR-V for that (heaptrack, castle route).
+        static const bool keep_spirv = [] {
+            const char* value = std::getenv("EDEN_NX2_KEEP_SPIRV");
+            return value != nullptr && value[0] == '1';
+        }();
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             spv_modules[stage].reset();
+            if (!keep_spirv) {
+                spirv[stage] = std::vector<u32>{};
+                continue;
+            }
             if (!spirv[stage].empty()) {
                 kept_spirv[stage] = Common::Compression::CompressDataZSTD(
                     reinterpret_cast<const u8*>(spirv[stage].data()),
@@ -707,6 +844,8 @@ template <typename Spec>
 bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
+    boost::container::small_vector<ComputedHandle, 16> computed_handles;
+    boost::container::small_vector<u32, 64> computed_values;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
 
@@ -796,13 +935,37 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const auto cbuf_address{[&cbufs](u32 cbuf) -> GPUVAddr {
             return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address : GPUVAddr{};
         }};
+        // Records each handle computed at draw time (ComputedHandlesChanged evaluates them again):
+        // one entry per descriptor, and its elements' values in order.
+        const auto note_computed{[&](const auto& desc, u32 element, u32 value) {
+            using Desc = std::remove_cvref_t<decltype(desc)>;
+            const auto [kind, first] = [&]() -> std::pair<ComputedHandleKind, const Desc*> {
+                if constexpr (std::is_same_v<Desc, Shader::TextureBufferDescriptor>) {
+                    return {TextureBuffer, info.texture_buffer_descriptors.data()};
+                } else if constexpr (std::is_same_v<Desc, Shader::ImageBufferDescriptor>) {
+                    return {ImageBuffer, info.image_buffer_descriptors.data()};
+                } else if constexpr (std::is_same_v<Desc, Shader::TextureDescriptor>) {
+                    return {Texture, info.texture_descriptors.data()};
+                } else {
+                    return {Image, info.image_descriptors.data()};
+                }
+            }();
+            if (element == 0) {
+                computed_handles.push_back({static_cast<u8>(stage), kind,
+                                            static_cast<u16>(&desc - first), 0,
+                                            static_cast<u32>(computed_values.size())});
+            }
+            ++computed_handles.back().count;
+            computed_values.push_back(value);
+        }};
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
-                return TexturePair(VideoCommon::EvaluateTextureHandle(
-                                       info, desc.handle_program, *gpu_memory, cbuf_address,
-                                       device.GetStorageBufferAlignment(), index),
-                                   via_header_index);
+                const u32 value{VideoCommon::EvaluateTextureHandle(
+                    info, desc.handle_program, *gpu_memory, cbuf_address,
+                    device.GetStorageBufferAlignment(), index)};
+                note_computed(desc, index, value);
+                return TexturePair(value, via_header_index);
             }
             ASSERT(cbufs[desc.cbuf_index].enabled);
             const u32 index_offset{index << desc.size_shift};
@@ -856,7 +1019,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     VideoCommon::SamplerId sampler{};
                     VideoCommon::EvaluateTextureHandles(
                         info, desc.handle_program, *gpu_memory, cbuf_address,
-                        device.GetStorageBufferAlignment(), desc.count, [&](u32, u32 raw) {
+                        device.GetStorageBufferAlignment(), desc.count, [&](u32 element, u32 raw) {
+                            note_computed(desc, element, raw);
                             const auto handle{TexturePair(raw, via_header_index)};
                             views.push_back({handle.first});
                             if (handle.second != last_sampler_index) {
@@ -1007,6 +1171,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         delta_views.assign(views.begin(), views.end());
         delta_samplers.assign(samplers.begin(), samplers.end());
+        delta_computed_handles.assign(computed_handles.begin(), computed_handles.end());
+        delta_computed_values.assign(computed_values.begin(), computed_values.end());
         configured_stages = Spec::enabled_stages;
         delta_views_valid = true;
         kept_images_valid = false;
@@ -1196,6 +1362,44 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
+bool GraphicsPipeline::ComputedHandlesChanged() const {
+    for (const ComputedHandle& handle : delta_computed_handles) {
+        const Shader::Info& info{stage_infos[handle.stage]};
+        const auto& cbufs{maxwell3d->state.shader_stages[handle.stage].const_buffers};
+        u32 program{};
+        switch (handle.kind) {
+        case TextureBuffer:
+            program = info.texture_buffer_descriptors[handle.descriptor].handle_program;
+            break;
+        case ImageBuffer:
+            program = info.image_buffer_descriptors[handle.descriptor].handle_program;
+            break;
+        case Texture:
+            program = info.texture_descriptors[handle.descriptor].handle_program;
+            break;
+        default:
+            program = info.image_descriptors[handle.descriptor].handle_program;
+            break;
+        }
+        // Each element as ConfigureImpl computes it (EvaluateTextureHandles gives the values
+        // EvaluateTextureHandle does, reading the words the elements share once).
+        bool changed{};
+        VideoCommon::EvaluateTextureHandles(
+            info, program, *gpu_memory,
+            [&](u32 cbuf) -> GPUVAddr {
+                return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
+                                                                  : GPUVAddr{};
+            },
+            device.GetStorageBufferAlignment(), handle.count, [&](u32 element, u32 value) {
+                changed |= value != delta_computed_values[handle.first_value + element];
+            });
+        if (changed) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
@@ -1333,6 +1537,9 @@ void GraphicsPipeline::KeepImageDescriptors(size_t stage, size_t first_entry) {
                               entries + end_entry);
 }
 
+/// Writes the descriptors the stages queued and the push constants, then records the draw's state
+/// and bindings. Returns false, and the draw is skipped, when the queued descriptor count does not
+/// match the pipeline or no descriptor memory can be reserved.
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
@@ -1495,7 +1702,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 .payload_words = mesh_emulation->payload_stride,
                 .capacity_words = capacity,
                 .block_words = mesh_emulation->block_words,
-                .vertices_per_group = mesh_emulation->max_primitives * 3,
+                .vertices_per_group = MeshEmulationVerticesPerGroup(),
                 .max_groups = device.GetMaxComputeWorkGroupCount()[0],
             };
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *distribution_pipeline);
@@ -1626,6 +1833,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     return true;
 }
 
+/// Creates the Vulkan pipeline for `render_pass`. A mesh pipeline without VK_EXT_mesh_shader is
+/// built from the mesh emulation's vertex shader as a point, line or triangle list.
 void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
         return;
@@ -2100,7 +2309,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             .pSpecializationInfo = nullptr,
         });
     }
-    // Mesh emulation draws a plain triangle list without vertex attributes.
+    // Mesh emulation draws a plain point, line or triangle list without vertex attributes.
     const VkPipelineVertexInputStateCreateInfo emulation_vertex_input{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .pNext = nullptr,
@@ -2110,11 +2319,14 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .vertexAttributeDescriptionCount = 0,
         .pVertexAttributeDescriptions = nullptr,
     };
+    const u32 emulation_corners{mesh_emulation ? mesh_emulation->primitive_vertices : 3U};
     const VkPipelineInputAssemblyStateCreateInfo emulation_input_assembly{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = emulation_corners == 1   ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                    : emulation_corners == 2 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                                             : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE,
     };
     VkPipelineCreateFlags flags{};
@@ -2153,9 +2365,33 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     };
-    pipeline = binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
-                                                           GraphicsRecordKey(key))
-                        : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
+    try {
+        // EDEN_NX2_TEST_PIPELINE_FAILURE=N: the first attempt of every Nth pipeline fails the
+        // way reported systems fail, to exercise the retry below.
+        static const u32 test_failure_every = [] {
+            const char* value = std::getenv("EDEN_NX2_TEST_PIPELINE_FAILURE");
+            return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+        }();
+        static std::atomic<u32> test_failure_count{};
+        if (test_failure_every != 0 &&
+            test_failure_count.fetch_add(1, std::memory_order_relaxed) % test_failure_every == 0) {
+            throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
+        }
+        pipeline = binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
+                                                               GraphicsRecordKey(key))
+                            : device.GetLogical().CreateGraphicsPipeline(pipeline_ci,
+                                                                         *pipeline_cache);
+    } catch (const vk::Exception& exception) {
+        // v8.1: some systems (reported on CachyOS) fail a share of Ocarina's pipelines with
+        // VK_ERROR_FEATURE_NOT_PRESENT, which RADV itself never returns for pipeline creation. A
+        // pipeline that fails draws nothing for the rest of the session: missing objects, and
+        // foliage left white because its colour pass never draws. Log what was asked for, then
+        // retry without the optional parts, so the object still draws.
+        LogFailedGraphicsPipeline(exception.GetResult(), pipeline_ci,
+                                  std::span<const VkDynamicState>(dynamic_states.data(),
+                                                                  dynamic_states.size()));
+        pipeline = RetryGraphicsPipeline(device, pipeline_ci, exception);
+    }
     TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)

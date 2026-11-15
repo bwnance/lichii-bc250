@@ -2165,6 +2165,9 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         }
     }
     for (const StorageBufferAddr& storage_buffer : info.set) {
+        if (program.info.storage_buffers_descriptors.size() >= Shader::Info::MAX_SSBOS) {
+            break;
+        }
         const bool is_written{info.writes.contains(storage_buffer)};
         const auto extent{extents.find(storage_buffer)};
         program.info.storage_buffers_descriptors.push_back({

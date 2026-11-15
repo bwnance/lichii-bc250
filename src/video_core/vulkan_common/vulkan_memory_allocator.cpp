@@ -312,7 +312,7 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
     {
         static const u64 recycle_cap = [] {
             const char* value = std::getenv("EDEN_NX2_IMAGE_RECYCLE_MIB");
-            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;
+            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{0}) << 20;  // v12: off by default (1 reuse per castle run, 227 MiB held)
         }();
         std::scoped_lock lock{g_image_pool.mutex};
         if (recycle_cap != 0 && g_image_pool.allocator == nullptr) {

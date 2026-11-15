@@ -144,6 +144,7 @@ protected:
      * @param key The setting's identifier
      * @param default_value The value to use when the setting is not already present in the config
      */
+    [[nodiscard]] bool UsesDefault(const std::string& full_key);
     bool ReadBooleanSetting(const std::string& key,
                             std::optional<bool> default_value = std::nullopt);
     s64 ReadIntegerSetting(const std::string& key, std::optional<s64> default_value = std::nullopt);

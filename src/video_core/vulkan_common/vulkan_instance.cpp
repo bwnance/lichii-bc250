@@ -124,7 +124,16 @@ void RemoveUnavailableLayers(const vk::InstanceDispatch& dld, std::vector<const 
     if (!layer_properties) {
         LOG_ERROR(Render_Vulkan, "Failed to query layer properties, disabling layers");
         layers.clear();
+        return;
     }
+    // Implicit layers (overlays, frame generation, capture tools) sit between the emulator and the
+    // driver; listing them makes a driver error that only some systems see traceable.
+    std::string names;
+    for (const VkLayerProperties& property : *layer_properties) {
+        names += names.empty() ? "" : ", ";
+        names += property.layerName;
+    }
+    LOG_INFO(Render_Vulkan, "Vulkan layers on this system: {}", names.empty() ? "none" : names);
     std::erase_if(layers, [&layer_properties](const char* layer) {
         const auto comp = [layer](const VkLayerProperties& layer_property) {
             return std::strcmp(layer, layer_property.layerName) == 0;

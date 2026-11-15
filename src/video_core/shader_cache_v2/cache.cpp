@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "common/assert.h"
+#include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/native_lowering.h"
 #include "video_core/nx2_stutter_trace.h"
@@ -17,16 +18,19 @@ namespace {
 
 /// Whether a record holds these inputs: a key that matches by chance never gives another
 /// program's code
-bool HoldsInputs(const ProgramRecord& record, const ProgramKeyInputs& inputs) {
+u128 HashNative(std::span<const Shader::Ampere::Instruction> native) {
+    return Common::CityHash128(reinterpret_cast<const char*>(native.data()), native.size_bytes());
+}
+
+bool HoldsInputs(const ProgramRecord& record, u64 native_size, const u128& native_hash,
+                 const ProgramKeyInputs& inputs) {
     return record.source == inputs.source && record.stage == inputs.stage &&
            record.header_size == inputs.header_size && record.geometry == inputs.geometry &&
            record.tessellation_stage == inputs.tessellation_stage &&
            record.native_code_address == inputs.native_code_address &&
            std::ranges::equal(record.sph, inputs.sph) &&
            std::ranges::equal(record.verified_traps, inputs.verified_traps) &&
-           record.native.size() == inputs.native.size() &&
-           std::memcmp(record.native.data(), inputs.native.data(), inputs.native.size_bytes()) ==
-               0;
+           native_size == inputs.native.size() && native_hash == HashNative(inputs.native);
 }
 
 } // Anonymous namespace
@@ -86,7 +90,12 @@ void Cache::LoadPrograms(std::span<const LogRecord> live) {
             continue;
         }
         std::shared_ptr<const LoweredNativeCode> code = TakeProgramCode(*record);
-        table.insert_or_assign(entry.key, LoadedProgram{std::move(*record), std::move(code)});
+        const u64 native_size = record->native.size();
+        const u128 native_hash = HashNative(record->native);
+        record->native = {};
+        record->lowered_code = {};
+        table.insert_or_assign(entry.key, LoadedProgram{std::move(*record), native_size,
+                                                        native_hash, std::move(code)});
     }
     loaded = std::move(table);
     loaded_ready.store(true, std::memory_order_release);
@@ -96,7 +105,8 @@ FoundProgram Cache::FindProgram(const ProgramKeyInputs& inputs) {
     const u64 key = ProgramKey(inputs);
     if (loaded_ready.load(std::memory_order_acquire)) {
         if (const auto it = loaded.find(key);
-            it != loaded.end() && HoldsInputs(it->second.record, inputs)) {
+            it != loaded.end() && HoldsInputs(it->second.record, it->second.native_size,
+                                              it->second.native_hash, inputs)) {
             return {ProgramLookup::Hit, it->second.code};
         }
     }

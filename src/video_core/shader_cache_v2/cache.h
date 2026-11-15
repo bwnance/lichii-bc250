@@ -72,9 +72,14 @@ public:
     void RecordProgram(const ProgramRecord& record);
 
 private:
-    /// A record of this build's lowering, its code moved out into `code`
+    /// A record of this build's lowering, its code moved out into `code` and its native
+    /// instructions replaced by their size and 128-bit hash: a hit still checks every input, but
+    /// the ~6,700 records of a long Ocarina cache no longer keep ~100 MB of native code alive for
+    /// the whole session.
     struct LoadedProgram {
-        ProgramRecord record;
+        ProgramRecord record; ///< Without `native` and `lowered_code`
+        u64 native_size{};
+        u128 native_hash{};
         std::shared_ptr<const LoweredNativeCode> code;
     };
 

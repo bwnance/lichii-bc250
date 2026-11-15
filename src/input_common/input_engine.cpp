@@ -14,6 +14,16 @@ void InputEngine::PreSetController(const PadIdentifier& identifier) {
     controller_list.try_emplace(identifier);
 }
 
+std::vector<PadIdentifier> InputEngine::GetPresetControllers() const {
+    std::scoped_lock lock{mutex};
+    std::vector<PadIdentifier> identifiers;
+    identifiers.reserve(controller_list.size());
+    for (const auto& [identifier, data] : controller_list) {
+        identifiers.push_back(identifier);
+    }
+    return identifiers;
+}
+
 void InputEngine::PreSetButton(const PadIdentifier& identifier, int button) {
     std::scoped_lock lock{mutex};
     ControllerData& controller = controller_list.at(identifier);

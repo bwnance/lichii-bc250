@@ -1,7 +1,7 @@
 name: bc250-release
 
-# Builds the BC-250 package (eden-cli only, no Qt GUI) and publishes it as a GitHub release when a
-# version tag (v7, v7.1, ...) is pushed. The installer downloads this package, so people don't have
+# Builds the BC-250 package (eden-cli for the Steam shortcut plus the Lichii Qt GUI for settings and
+# controller mapping) and publishes it as a GitHub release when a version tag (v11, ...) is pushed. The installer downloads this package, so people don't have
 # to build the emulator themselves (tools/bc250/bc250-install.sh; --build compiles from source).
 #
 # Compatibility: built on Ubuntu 24.04 (glibc 2.39) and packaged with linuxdeploy, which bundles
@@ -17,8 +17,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build and publish (for a re-run)
-        required: true
+        description: Existing tag to build (empty = the branch this run is started on)
+        required: false
+        default: ""
+      publish:
+        description: Publish the release (off = only keep the package as a workflow artifact)
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -31,6 +36,8 @@ env:
   # The PGO profile (lichii-linux.profdata) is written by LLVM 23; older clang can't read it.
   PGO_LLVM_VERSION: "23"
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # A tag push always publishes; a manual run publishes when asked and a tag was given.
+  PUBLISH: ${{ github.event_name == 'push' || (github.event.inputs.publish == 'true' && github.event.inputs.tag != '') }}
 
 jobs:
   build:
@@ -45,7 +52,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           # Full ref: a branch can share the tag's name (branch v7, tag v7).
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ (github.event_name == 'push' || github.event.inputs.tag != '') && format('refs/tags/{0}', env.TAG) || github.ref }}
 
       - name: Install dependencies
         run: |
@@ -56,7 +63,20 @@ jobs:
             libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
             libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
             libboost-dev libboost-fiber-dev libboost-context-dev \
-            libopus-dev libasound2-dev ccache file
+            libopus-dev libasound2-dev ccache file \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+
+      # The GUI: same Qt as upstream Lichii's Linux release.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtcharts
+          cache: true
 
       # Versioned packages from apt.llvm.org: Ubuntu's clang 18 can't read the profile.
       - name: Install clang ${{ env.PGO_LLVM_VERSION }}
@@ -97,7 +117,9 @@ jobs:
             -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_QT=OFF -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF \
+            -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF -DENABLE_QT_TRANSLATION=OFF \
+            "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR" \
+            -DYUZU_CMD=ON -DENABLE_WEB_SERVICE=OFF \
             -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF \
             -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=OFF \
             -DYUZU_USE_BUNDLED_SDL3=ON \
@@ -115,12 +137,13 @@ jobs:
           path: .cache/cpm
           key: ${{ steps.cpm-cache.outputs.cache-primary-key }}
 
-      - name: Build eden-cli
+      - name: Build eden-cli and the GUI
         run: |
           ccache --zero-stats
-          cmake --build build --target yuzu-cmd --parallel
+          cmake --build build --target yuzu-cmd yuzu --parallel
           ccache --show-stats
           test -x build/bin/eden-cli
+          test -x build/bin/lichii
           build/bin/eden-cli --version 2>/dev/null | head -1 || true
 
       - name: Save compiler objects
@@ -136,37 +159,58 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
-          strip build/bin/eden-cli
+          strip build/bin/eden-cli build/bin/lichii
           tools="$RUNNER_TEMP/linuxdeploy"
           mkdir -p "$tools"
           curl -fsSL -o "$tools/linuxdeploy.AppImage" \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x "$tools/linuxdeploy.AppImage"
+          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-x86_64.AppImage" \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x "$tools"/*.AppImage
+          export PATH="$tools:$PATH"
           export APPIMAGE_EXTRACT_AND_RUN=1
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          icon="$RUNNER_TEMP/io.github.zortos293.lichii.png"   # named like the .desktop's Icon=
+          cp dist/lichii.png "$icon"
+          export EXTRA_QT_MODULES=waylandcompositor
+          export EXTRA_PLATFORM_PLUGINS='libqwayland-egl.so;libqwayland-generic.so'
           pkg=lichii-bc250
           mkdir -p "$pkg/usr/bin"
           if [ -f build/bin/nx2_switches.txt ]; then cp build/bin/nx2_switches.txt "$pkg/usr/bin/"; fi
           # The Vulkan loader must be the system's: it finds the system's GPU drivers (ICDs) and
           # layers (gamescope's WSI layer, MangoHud).
           "$tools/linuxdeploy.AppImage" --appdir "$pkg" --executable build/bin/eden-cli \
+            --executable build/bin/lichii --plugin qt \
+            --desktop-file dist/io.github.zortos293.lichii.desktop --icon-file "$icon" \
             --exclude-library 'libvulkan.so*'
+          test -f "$pkg/usr/bin/qt.conf"
           rm -f "$pkg"/usr/lib/libvulkan.so*
           # linuxdeploy also writes an AppDir skeleton (AppRun, .desktop, icons); not needed here.
           rm -rf "$pkg/AppRun" "$pkg"/*.desktop "$pkg/usr/share/applications" "$pkg/usr/share/icons" "$pkg"/.DirIcon "$pkg"/*.png 2>/dev/null || true
           ln -s usr/bin/eden-cli "$pkg/eden-cli"
+          ln -s usr/bin/lichii "$pkg/lichii"
           mkdir -p "$pkg/tools"
-          cp tools/bc250/bc250-install.sh tools/bc250/bc250-uninstall.sh tools/bc250/add_steam_shortcut.py "$pkg/tools/"
+          cp tools/bc250/bc250-install.sh tools/bc250/bc250-uninstall.sh tools/bc250/add_steam_shortcut.py \
+            tools/bc250/import_gui_controls.py "$pkg/tools/"
           cp README.md CHANGELOG.md LICENSE.txt "$pkg/"
           printf '%s\n%s\n' "$TAG" "$(git rev-parse --short=10 HEAD)" > "$pkg/VERSION"
           # Every library the binary loads must resolve from the package or the base system.
-          ldd "$pkg/usr/bin/eden-cli" | tee ldd.txt
+          ldd "$pkg/usr/bin/eden-cli" "$pkg/usr/bin/lichii" | tee ldd.txt
           ! grep -q "not found" ldd.txt
           ! grep -q "$pkg/usr/lib/libvulkan" ldd.txt
           tar -czf "lichii-bc250-$TAG-linux-x86_64.tar.gz" "$pkg"
           sha256sum "lichii-bc250-$TAG-linux-x86_64.tar.gz" > "lichii-bc250-$TAG-linux-x86_64.tar.gz.sha256"
           ls -la lichii-bc250-*
 
+      - name: Keep the package as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-bc250-${{ env.TAG }}
+          path: lichii-bc250-*.tar.gz*
+          retention-days: 7
+
       - name: Publish the release
+        if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

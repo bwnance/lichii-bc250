@@ -323,6 +323,7 @@ private:
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     /// Pipelines were evicted: TickFrame queues QueueHeapTrim once they are all destroyed.
     bool trim_after_evictions{};
+    size_t last_logged_built{};
     /// Common::TrimHeap on the serialization thread (Linux with glibc).
     void QueueHeapTrim(const char* reason);
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since

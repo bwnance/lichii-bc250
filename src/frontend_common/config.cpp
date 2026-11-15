@@ -745,6 +745,19 @@ void Config::SaveLibraryAppletValues() {
     EndGroup();
 }
 
+// A value counts as the default only when its "<key>\\default" line says so. Without that line, a
+// value written into the file (by hand, from the README or another tool) is used: the emulator
+// rewrites the file on every start, and treating such a line as the default used to replace the
+// person's controller mapping or setting with the default one.
+bool Config::UsesDefault(const std::string& full_key) {
+    const std::string section = GetSection();
+    const std::string default_key = std::string(full_key).append("\\default");
+    if (config->GetValue(section.c_str(), default_key.c_str(), nullptr) != nullptr) {
+        return config->GetBoolValue(section.c_str(), default_key.c_str(), true);
+    }
+    return config->GetValue(section.c_str(), full_key.c_str(), nullptr) == nullptr;
+}
+
 bool Config::ReadBooleanSetting(const std::string& key, const std::optional<bool> default_value) {
     std::string full_key = GetFullKey(key, false);
     if (!default_value.has_value()) {
@@ -771,7 +784,7 @@ s64 Config::ReadIntegerSetting(const std::string& key, const std::optional<s64> 
     }
 
     s64 result = 0;
-    if (config->GetBoolValue(GetSection().c_str(), std::string(full_key).append("\\default").c_str(), true)) {
+    if (UsesDefault(full_key)) {
         result = default_value.value();
     } else {
         try {
@@ -796,8 +809,7 @@ u64 Config::ReadUnsignedIntegerSetting(const std::string& key,
     }
 
     u64 result = 0;
-    if (config->GetBoolValue(GetSection().c_str(),
-                             std::string(full_key).append("\\default").c_str(), true)) {
+    if (UsesDefault(full_key)) {
         result = default_value.value();
     } else {
         try {
@@ -818,8 +830,7 @@ double Config::ReadDoubleSetting(const std::string& key,
     }
 
     double result;
-    if (config->GetBoolValue(GetSection().c_str(),
-                             std::string(full_key).append("\\default").c_str(), true)) {
+    if (UsesDefault(full_key)) {
         result = default_value.value();
     } else {
         result =
@@ -838,8 +849,7 @@ std::string Config::ReadStringSetting(const std::string& key,
         return result;
     }
 
-    if (config->GetBoolValue(GetSection().c_str(),
-                             std::string(full_key).append("\\default").c_str(), true)) {
+    if (UsesDefault(full_key)) {
         result = default_value.value();
     } else {
         result =
@@ -952,7 +962,7 @@ void Config::ReadSettingGeneric(Settings::BasicSetting* const setting) {
     }
 
     if (global || !use_global) {
-        const bool is_default = ReadBooleanSetting(std::string(key).append("\\default"), std::make_optional(true));
+        const bool is_default = UsesDefault(GetFullKey(key, false));
         if (!is_default) {
             setting->LoadString(ReadStringSetting(key, default_value));
         } else {

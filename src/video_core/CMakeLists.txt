@@ -18,6 +18,7 @@ add_library(video_core STATIC
     buffer_cache/buffer_cache_base.h
     buffer_cache/buffer_cache.cpp
     buffer_cache/buffer_cache.h
+    buffer_cache/indirect_buffer.h
     buffer_cache/memory_tracker_base.h
     buffer_cache/usage_tracker.h
     buffer_cache/virtual_range_cache.h
@@ -131,6 +132,7 @@ add_library(video_core STATIC
     nx2_stutter_trace.h
     nx2_perf.h
     nx2_async_readback.h
+    nx2_backx.h
     nx2_download_trace.h
     pending_maps.h
     present.h
@@ -375,6 +377,7 @@ add_library(video_core STATIC
     textures/workers.h
     transform_feedback.cpp
     transform_feedback.h
+    vertex_input_cache.h
     video_core.cpp
     video_core.h
 )

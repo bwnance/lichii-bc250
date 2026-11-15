@@ -4,6 +4,130 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v12 — 2026-11-15: steadier play in big areas, about 0.6 GB less GPU memory, no runaway Steam cache
+
+- **Steam's shader pre-cache no longer fills the disk.** Steam records every pipeline a game
+  builds into `~/.local/share/Steam/steamapps/shadercache/<id>/fozpipelinesv6`. For an emulator
+  that file never stops growing: on the BC-250 it reached 42 GB in a day and filled the disk. The
+  launcher now turns that recording off (`DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1`), which also
+  made area loads and play smoother. If you updated from an older version, you can delete the
+  `fozpipelinesv6` folder under your Ocarina shortcut's id to get the space back.
+- **About 0.6 GB less GPU memory while playing** (3.6-3.9 GB instead of 4.3-4.6 GB on the Castle
+  Town route): the spare image pool and the device-memory reserve, which held up to 0.5 GB for
+  almost no reuse, are off by default (`EDEN_NX2_IMAGE_RECYCLE_MIB` / `EDEN_NX2_MEM_RESERVE_MIB`
+  turn them back on). On a 16 GB board that RAM is what keeps the game out of swap: in 4 test runs
+  of each version, v11 fell into heavy swapping once (field and town at 47-52 fps), v12 never.
+- **Shorter freezes when entering big areas.** Entering Castle Town made thousands of new upload
+  buffers in a single frame (2,209 in one 6.4 s frame), each a fresh memory allocation. Past
+  64 MiB of uploads in flight the emulator now waits a few milliseconds for the GPU and reuses
+  one (`EDEN_NX2_STAGING_CAP_MIB`, 0 = off).
+- Upstream Lichii fixes: texture-cache cleanup that no longer stalls on images it can't remove
+  and frees the emptiest memory blocks first (#1731), tighter timing for emulated events (#1733),
+  a shader simplification (#1681), and two Ocarina timing fixes for the FPS unlock (cutscene
+  frames #1743, Scarecrow's Song #1745).
+- Known: the first ~30 s after arriving in a big area (Castle Town's plaza) can still drop below
+  60 fps while the game reads back memory swapped out during the load.
+
+### v11 — 2026-11-14: controller settings kept, the GUI in the package, texture-cache and upstream fixes
+
+- **Controller settings stay put.** A mapping line written into `oot.ini` without its
+  `<key>\default=false` line was read as "use the default" and, because the emulator rewrites
+  its config on every start, replaced by a keyboard key marked as set: hand-made controller
+  mappings vanished after one launch. Such a line is now used as written. The installer also
+  saves `oot.ini` before every update (`oot.ini.bak-<date>`, last five kept), and the uninstaller
+  keeps it in `~/.config/lichii-bc250/oot.ini` for a reinstall.
+- **The GUI is back in the package.** The release now carries Lichii's Qt window next to
+  `eden-cli`: `lichii-bc250 --gui`, or **Lichii BC-250** in the Desktop Mode menu. A controller
+  mapped there is copied into `oot.ini` on the next game start from the Steam shortcut.
+- Texture cache: images the GPU drew into and used in the last 300 frames are no longer thrown
+  away and rebuilt when the cache is over its limit (the 297 MiB shadow map was rebuilt
+  repeatedly late in long sessions, with 1-2.5 s freezes).
+- Lichii upstream: the Ocarina white-flash fix (revert of #1486), Ocarina FPS-unlock fixes,
+  foliage shadows (points and lines) through the mesh fallback, and an audio gap fix.
+
+### v10 — 2026-11-14: fixes for missing foliage on some drivers and for controllers outside Steam
+
+- **Missing or white/yellow foliage and props, for real this time.** The v9 logs from an affected
+  CachyOS system showed what the driver refuses: pipelines with **mesh shaders**. Stock RADV offers
+  no mesh shaders on the BC-250 (GFX1013), so every BC-250 this fork is tuned on draws Ocarina's
+  task/mesh programs through the emulator's compute fallback. That CachyOS driver build does offer
+  `VK_EXT_mesh_shader` there, then refuses every mesh pipeline (`VK_ERROR_FEATURE_NOT_PRESENT`),
+  so the grass, leaves and props drawn that way never appeared. On a BC-250 the emulator now always
+  uses the fallback (`EDEN_NX2_ALLOW_NATIVE_MESH=1` keeps the driver's mesh shaders).
+  **On v9 the same fix is one variable:** `EDEN_NX2_FORCE_MESH_FALLBACK=1`.
+- **Controllers that aren't Steam's virtual pad now work.** The installer binds player 1 to
+  Steam Input's virtual pad, which every controller becomes when the game starts from Steam with
+  Steam Input on. Started any other way (Desktop Mode, a terminal, Steam Input off), a pad shows up
+  under its own identity and nothing was bound to it: no input at all (reported with a Bluetooth
+  8BitDo after a switch to Bazzite). When the bound controller isn't connected, the first other
+  gamepad now stands in for it, read through SDL's standard gamepad layout, so buttons, sticks and
+  triggers land in the right place on any pad. It works for a pad connected before or after the
+  game starts. Tested on the BC-250 with a virtual Bluetooth pad and Steam's pad hidden: before
+  the fix the title screen ignored it, with it the pad went through the menus into the game.
+- **Logs for input reports:** at start the log lists every gamepad the system has, with its IDs and
+  whether the emulator can open it (`Gamepad on this system: ...`), names each controller that
+  connects, and says when a pad stands in for the bound one.
+- Castle route 53.8 screen fps, 6.1 repeated frames/s, the same as v9; same log lines.
+
+
+### v9 — 2026-11-14: about 500 MB less RAM, fix for missing objects and white/yellow foliage
+
+- **About 500 MB less emulator memory** (Castle Town route, end of route: ~3.5 GB of the
+  emulator's own memory instead of ~4.05 GB in v8). Two changes did it, with no change to what is
+  drawn:
+  - built pipelines no longer keep a compressed copy of their shader code (about 310 MB in a long
+    session); set `EDEN_NX2_KEEP_SPIRV=1` to keep it;
+  - each shader's bookkeeping record is about 70 % smaller (its storage-buffer list was a fixed
+    64-entry array; Ocarina's shaders use at most a handful), about 200 MB over ~3,800 pipelines.
+  Less memory used means the 11 GB compressed swap fills later, so the 1-4 s pauses that start
+  when it spills to the disk swapfile in long sessions come later or not at all.
+- **Pipelines the GPU driver refuses are now built again instead of being dropped.** Some
+  systems (reported on CachyOS) fail a share of the game's graphics pipelines with
+  `VK_ERROR_FEATURE_NOT_PRESENT`. In v8 such a pipeline drew nothing for the rest of the session:
+  objects went missing, and grass and leaves stayed white or glowing yellow because the pass that
+  colours them never ran. v9 retries a refused pipeline without the pipeline cache, then also
+  without the optional extension state, and logs which retry worked.
+- **Better logs for this kind of report:** the log now lists the Vulkan layers installed on the
+  system (overlays, capture and frame-generation tools sit between the emulator and the driver)
+  and, for each refused pipeline, what it asked the driver for. If the problem remains, the
+  `Driver refused a graphics pipeline` lines in `eden_log.txt` say which part is refused.
+- **Checked on the BC-250** with CachyOS's own driver (Mesa 26.2.6 from a CachyOS container) and
+  an empty shader cache. That driver did not refuse any pipeline here, so the retry was tested by
+  forcing every third pipeline to fail first: every one was built on the first retry and Hyrule
+  Field rendered correctly. Castle route: 53.7 screen fps, same as v8 within run-to-run noise.
+- **Known, same as v8:** with an empty shader cache (first start, or after deleting it) the
+  scene can look washed out or white for up to ~40 s after loading, and new areas can show white
+  leaves for a few seconds, while their shaders compile in the background. It goes away once
+  they're built and doesn't come back on later starts.
+- New diagnostics: `EDEN_NX2_KEPT_PIPELINES` (how many built pipelines stay alive), a "Built
+  graphics pipelines" log line, `EDEN_NX2_TEST_PIPELINE_FAILURE=N` (fails every Nth pipeline's
+  first attempt, to test the retry).
+
+
+### v8 — 2026-11-13: smoother open areas (14 upstream speed-ups)
+
+- **14 Lichii commits cherry-picked onto v7**, the ones that make the GPU threads and the CPU JIT
+  cheaper: cheaper reports and fences (#1515, #1516), page protection outside the cache lock
+  (#1518), reused command-list copies (#1520), more fast draws (#1519, #1521), list-fed macro
+  calls without waiting (#1486), back-thread micro-cuts (#1586), 3D state writes sent as
+  register blocks (#1585), faster JIT register allocation and x86-64 code generation (#1517,
+  #1531, #1570), plus the two follow-up fixes (#1591, #1592).
+- **Hyrule Field** (first 3 minutes, 3 runs each against v7): 3.4-5.5 repeated frames/s instead
+  of 5.9-9.0, 17-41 frames over 40 ms per minute instead of 32-65, game 29.3-29.6 fps instead of
+  28.3-29.3. **Castle route:** 53.9-55.0 screen fps (v7 52.9-53.5), entry freeze 2.8-2.9 s,
+  same GPU memory.
+- **The installer runs the release in a small Fedora 42 container** (`lichii-bc250-runtime`,
+  created in under a minute, only the GPU driver and system libraries). Run directly on Bazzite
+  the same program held about 1.4 GB more memory (title screen 4.1 vs 2.5 GB, Castle Town peak
+  5.5 vs 4.0 GB); a 33-minute session that way filled RAM and swap and locked up the console.
+  `--native` keeps the old behaviour; the uninstaller removes the container too.
+- **New optional setup step 8:** a systemd-oomd safety net that closes the game instead of
+  letting the console lock up if memory ever runs out.
+- **Not taken:** the newest upstream builds as a whole. Merging Lichii build 196 and the 35
+  commits after it lengthened the Castle Town entry freeze (6-11 s instead of 2-3 s) and kept
+  ~500 MB more GPU memory there; that merge is kept on branch `exp/v8-full-merge` for later.
+
+
 ### v7 — 2026-11-12: shorter freezes in big areas, prebuilt releases
 
 - **Prebuilt releases.** Pushing a `v*` tag builds the PGO emulator on GitHub (Ubuntu 24.04,

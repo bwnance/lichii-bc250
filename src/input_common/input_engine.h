@@ -239,6 +239,8 @@ public:
     }
 
     void PreSetController(const PadIdentifier& identifier);
+    /// Every controller something registered (bindings, or a driver for a connected device)
+    [[nodiscard]] std::vector<PadIdentifier> GetPresetControllers() const;
     void PreSetButton(const PadIdentifier& identifier, int button);
     void PreSetHatButton(const PadIdentifier& identifier, int button);
     void PreSetAxis(const PadIdentifier& identifier, int axis);

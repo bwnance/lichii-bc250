@@ -9,6 +9,8 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <optional>
+#include <unordered_set>
 #include <thread>
 #include "common/container/unordered_map.h"
 
@@ -120,6 +122,20 @@ private:
     ::Common::unordered_map<Common::UUID, std::vector<std::shared_ptr<SDLJoystick>>> joystick_map;
     std::mutex joystick_map_mutex;
     std::chrono::steady_clock::time_point last_motion_stall_check{};
+
+    /// Stand-in pad: when no connected controller matches the one the bindings name (the BC-250
+    /// template binds Steam Input's virtual pad), the first other gamepad's input is translated
+    /// through SDL's gamepad layout and also reported as that controller (UpdateStandIn).
+    void UpdateStandIn();
+    void HandleStandInEvent(const SDL_Event& event);
+    std::atomic_bool standin_dirty{true};
+    /// Controllers InitJoystick registered for connected devices (joystick_map_mutex): the rest of
+    /// the engine's registered controllers are the ones bindings name
+    std::unordered_set<PadIdentifier> device_presets;
+    SDL_JoystickID standin_source{0};
+    std::optional<PadIdentifier> standin_target;
+    u8 standin_hat{};
+    std::chrono::steady_clock::time_point standin_checked{};
 
     std::atomic<bool> initialized = false;
     bool start_thread;

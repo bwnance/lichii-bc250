@@ -16,6 +16,7 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -245,7 +246,62 @@ StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage us
     if (const std::optional<StagingBufferRef> ref = TryGetReservedBuffer(size, usage, deferred)) {
         return *ref;
     }
+    // Area loads upload hundreds of textures inside one frame: the stream buffer fills and every
+    // further upload used to make a new staging buffer, since the ones made a moment earlier are
+    // still in flight. Castle Town's entry on the BC-250 made 2209 of them in a single 6.4 s
+    // frame, each a fresh kernel allocation (~2.3 ms under memory pressure) and hundreds of MiB of
+    // extra GPU memory that pushed the game into swap. Past EDEN_NX2_STAGING_CAP_MIB (default 64;
+    // 0 = off) of upload staging, wait for the oldest one that fits to finish on the GPU (the copy
+    // takes milliseconds) and reuse it instead.
+    static const u64 cap = [] {
+        const char* value = std::getenv("EDEN_NX2_STAGING_CAP_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 64ULL) << 20;
+    }();
+    if (usage == MemoryUsage::Upload && !deferred && cap != 0 && CachedBytes(usage) >= cap) {
+        auto& entries = GetCache(usage)[Common::Log2Ceil(size)].entries;
+        const StagingBuffer* oldest = nullptr;
+        for (const StagingBuffer& entry : entries) {
+            if (!entry.deferred && entry.capacity >= size &&
+                (oldest == nullptr || entry.tick < oldest->tick)) {
+                oldest = &entry;
+            }
+        }
+        if (oldest != nullptr) {
+            const auto start = std::chrono::steady_clock::now();
+            scheduler.Wait(oldest->tick);
+            ++capped_waits;
+            capped_wait_time += std::chrono::steady_clock::now() - start;
+            if (const std::optional<StagingBufferRef> ref =
+                    TryGetReservedBuffer(size, usage, deferred)) {
+                LogStagingStats();
+                return *ref;
+            }
+        }
+    }
+    ++created_buffers;
+    created_bytes += size;
+    LogStagingStats();
     return CreateStagingBuffer(size, usage, deferred);
+}
+
+void StagingBufferPool::LogStagingStats() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - stats_start < std::chrono::seconds{10}) {
+        return;
+    }
+    if (created_buffers != 0 || capped_waits != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Staging buffers 10 s: {} created ({} MiB asked), {} reused after waiting "
+                 "({:.1f} ms), upload cache {} MiB",
+                 created_buffers, created_bytes >> 20, capped_waits,
+                 std::chrono::duration<double, std::milli>(capped_wait_time).count(),
+                 CachedBytes(MemoryUsage::Upload) >> 20);
+    }
+    created_buffers = 0;
+    created_bytes = 0;
+    capped_waits = 0;
+    capped_wait_time = {};
+    stats_start = now;
 }
 
 std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t size,

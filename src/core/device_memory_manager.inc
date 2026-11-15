@@ -10,6 +10,7 @@
 #include <memory>
 #include <source_location>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <algorithm>
 #include <vector>
@@ -218,6 +219,13 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
         VAddr virtual_address; ///< 0: no CPU mapping known
         u64 size;
     };
+    // Images at GPU addresses without memory get placeholder addresses past the device address
+    // space, which has no pages to look up.
+    constexpr DAddr address_space_end = DAddr{1} << AS_BITS;
+    if (address >= address_space_end) {
+        return;
+    }
+    size = static_cast<size_t>((std::min)(DAddr{size}, address_space_end - address));
     std::vector<Run> runs;
     const size_t page_end = Common::DivCeil(address + size, Memory::YUZU_PAGESIZE);
     for (size_t page = address >> Memory::YUZU_PAGEBITS; page < page_end; ++page) {
@@ -331,6 +339,9 @@ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
     device_inter->InvalidateRegion(address, size);
+    while (deferred_cached_updates.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     std::scoped_lock lk(kept_mutex, mapping_guard);
     if (!kept_pages.empty()) {
         for (size_t i = 0; i < num_pages; i++) {

@@ -68,6 +68,7 @@
 #include "video_core/shader_cache.h"
 #include "video_core/shader_cache_v2/cache_file.h"
 #include "video_core/shader_cache_v2/records.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
@@ -562,6 +563,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     // A sixty-fourth of the RAM (16 GB: 256 MB), about 25 KB per evicted pipeline
     const u64 ram = Common::GetMemInfo().TotalPhysicalMemory;
     kept_stages = decltype(kept_stages){ram != 0 ? ram / 64 : u64{256} << 20};
+    if (Settings::values.use_vulkan_driver_pipeline_cache.GetValue() && !use_vulkan_pipeline_cache) {
+        LOG_INFO(Render_Vulkan, "Driver keeps its own pipeline cache, not saving a Vulkan one");
+    }
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
     const VkShaderStageFlags subgroup_stages{device.GetSubgroupSupportedStages()};
@@ -777,6 +781,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         Settings::values.vertex_input_dynamic_state.GetValue();
     dynamic_features.has_static_vertex_repack =
         StaticVertexRepackEnabled(device.GetMinVertexInputBindingStrideAlignment());
+    VideoCommon::Nx2FastDraw::g_dynamic_vertex_input.store(
+        dynamic_features.has_dynamic_vertex_input, std::memory_order_relaxed);
 
     dynamic_features.has_provoking_vertex = device.IsExtProvokingVertexSupported();
     dynamic_features.has_provoking_vertex_first_mode =
@@ -859,13 +865,24 @@ constexpr u64 EvictAfterFrames = 9000;
 /// Built graphics pipelines kept before unused ones are destroyed (KeptPipelinesForMemory). 0 on
 /// Android, where driver memory is short: every pipeline unused for EvictAfterFrames is destroyed
 /// there, except up to MaxUnusedPrebuiltPipelines prebuilt ones no draw has used.
+///
+/// EDEN_NX2_KEPT_PIPELINES=<n> overrides it (0 = destroy every pipeline unused for
+/// EvictAfterFrames, as on Android). On the 16 GB BC-250 the default (a quarter of RAM, ~13,000)
+/// let built pipelines and the driver's data for them grow without bound over a long session.
 size_t KeptPipelines() {
+    static const size_t kept = [] {
+        if (const char* value = std::getenv("EDEN_NX2_KEPT_PIPELINES"); value != nullptr) {
+            const size_t configured = static_cast<size_t>(std::strtoull(value, nullptr, 10));
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_KEPT_PIPELINES: {} built pipelines kept", configured);
+            return configured;
+        }
 #ifdef __ANDROID__
-    return 0;
+        return size_t{0};
 #else
-    static const size_t kept = KeptPipelinesForMemory(Common::GetMemInfo().TotalPhysicalMemory);
-    return kept;
+        return KeptPipelinesForMemory(Common::GetMemInfo().TotalPhysicalMemory);
 #endif
+    }();
+    return kept;
 }
 } // Anonymous namespace
 
@@ -2289,6 +2306,17 @@ void PipelineCache::TickFrame() {
 }
 
 void PipelineCache::EvictUnusedPipelines() {
+    if (const size_t built = static_cast<size_t>(
+            std::ranges::count_if(graphics_cache, [](const auto& entry) {
+                return entry.second != nullptr && entry.second->IsBuilt();
+            }));
+        built != last_logged_built) {
+        last_logged_built = built;
+        LOG_INFO(Render_Vulkan,
+                 "Built graphics pipelines: {} (kept up to {}), {} evicted kept for a rebuild "
+                 "({} KiB)",
+                 built, KeptPipelines(), kept_stages.Size(), kept_stages.Bytes() >> 10);
+    }
     // Building a pipeline again on MoltenVK means a Metal compile mid-game, far dearer than the
     // rebuild cost below, so none are evicted there.
     if (device.IsMoltenVK() || frame_count <= EvictAfterFrames) {
@@ -2350,8 +2378,11 @@ void PipelineCache::EvictUnusedPipelines() {
         }
         evicted_pointer_slots.Remember(it->first.Hash(), it->second->MappedPointers());
         KeptGraphicsStages kept = it->second->TakeKeptStages();
-        const u64 bytes = kept.Bytes();
-        kept_stages.Add(it->first, std::move(kept), bytes);
+        // Without EDEN_NX2_KEEP_SPIRV there is no SPIR-V to build from: translate it again.
+        if (std::ranges::any_of(kept.spirv, [](const auto& stage) { return !stage.empty(); })) {
+            const u64 bytes = kept.Bytes();
+            kept_stages.Add(it->first, std::move(kept), bytes);
+        }
         evicted_pipelines.emplace_back(tick, std::move(it->second));
         graphics_cache.erase(it);
     }
@@ -2673,7 +2704,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         bool eligible{mesh_index != 0 && (mesh_index == 1 || has_task) &&
                       layer_source_program == nullptr};
         const Shader::IR::Program& mesh{programs[mesh_index]};
-        eligible = eligible && mesh.mesh.topology == 4 && mesh.mesh.primitive_lines.empty() &&
+        // Points (0), lines (1) and triangles (4).
+        const u32 topology{mesh.mesh.topology};
+        eligible = eligible && (topology == 0 || topology == 1 || topology == 4) &&
+                   mesh.mesh.primitive_lines.empty() &&
                    !mesh.mesh.vertex_lines.empty() && mesh.mesh.max_vertices != 0 &&
                    mesh.mesh.max_primitives != 0;
         for (size_t index = 1; index < Maxwell::MaxShaderProgram && eligible; ++index) {
@@ -2749,6 +2783,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         mesh_emulation->block_words = Shader::Backend::SPIRV::MeshEmulationBlockWords(mesh.mesh);
         mesh_emulation->max_primitives = mesh.mesh.max_primitives;
+        mesh_emulation->primitive_vertices = mesh.mesh.PrimitiveVertices();
         mesh_emulation->max_vertices = mesh.mesh.max_vertices;
         mesh_emulation->vertex_lines = static_cast<u32>(mesh.mesh.vertex_lines.size());
         for (u32 line = 0; line < mesh.mesh.vertex_lines.size(); ++line) {
@@ -2880,7 +2915,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 mesh_emulation->vertex_spirv = Shader::Backend::SPIRV::EmitMeshEmulationVertex(
                     profile, program.mesh, mesh_emulation->output_binding,
                     mesh_emulation->has_task ? mesh_emulation->args_binding : ~0U,
-                    runtime_info.convert_depth_mode && !profile.support_native_ndc);
+                    runtime_info.convert_depth_mode && !profile.support_native_ndc,
+                    runtime_info.fixed_state_point_size.value_or(1.0f));
             }
         }
         ConvertLegacyToGeneric(program, runtime_info);

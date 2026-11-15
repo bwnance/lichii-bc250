@@ -391,7 +391,9 @@ struct Info {
 
     boost::container::static_vector<ConstantBufferDescriptor, MAX_CBUFS>
         constant_buffer_descriptors;
-    boost::container::static_vector<StorageBufferDescriptor, MAX_SSBOS> storage_buffers_descriptors;
+    /// Up to MAX_SSBOS. A small_vector: inline room for MAX_SSBOS (64 x 80 bytes) made every Info
+    /// 7 KiB, kept per pipeline stage and per cached program (~280 MiB in OoT on the BC-250).
+    boost::container::small_vector<StorageBufferDescriptor, 4> storage_buffers_descriptors;
     TextureBufferDescriptors texture_buffer_descriptors;
     ImageBufferDescriptors image_buffer_descriptors;
     TextureDescriptors texture_descriptors;
