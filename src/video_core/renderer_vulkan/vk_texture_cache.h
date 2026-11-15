@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -123,6 +122,11 @@ public:
         return memory_allocator.FailedImages();
     }
 
+    /// Device-local bytes placed in host memory since the last call (see MemoryAllocator).
+    u64 TakeSpilledBytes() const noexcept {
+        return memory_allocator.TakeSpilledBytes();
+    }
+
     void LogMemoryStatistics() const;
     void CheckMemoryPeak() const;
 
@@ -159,8 +163,8 @@ public:
 
     /// Records a health check of a game's DLSS network output against its input (both sampled in
     /// the GENERAL layout) and returns an earlier check's result once the GPU has finished it.
-    [[nodiscard]] std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(ImageView& input,
-                                                                              ImageView& output);
+    [[nodiscard]] std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
+        ImageView& input, ImageView& output, std::optional<std::array<u32, 2>> input_region);
 
     void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
 

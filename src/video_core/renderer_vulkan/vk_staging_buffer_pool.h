@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -112,6 +111,9 @@ private:
     StagingBuffersCache& GetCache(MemoryUsage usage);
 
     void ReleaseCache(MemoryUsage usage);
+
+    /// Frees every staging buffer the GPU is done with, of every kind (out of memory).
+    void ReleaseIdleBuffers();
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
     /// Frees idle large staging buffers, keeping up to `keep` bytes of them.

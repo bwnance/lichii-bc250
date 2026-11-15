@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
 #include <cstdlib>
+#include <initializer_list>
 #include <utility>
 #include <vector>
 
@@ -98,8 +98,11 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         .pNext = nullptr,
         .flags = 0,
         .size = stream_buffer_size + STREAM_BUFFER_TAIL,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        // Transfer destination too: GPU-written list words are copied over their placeholders
+        // in the constant buffers streamed here (Nx2ListSlots::PatchUniform).
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -361,7 +364,67 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
+    vk::Buffer buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+    if (!buffer) {
+        // No memory left for it (#262: Mario Kart World on an 8 GB laptop with Intel UHD, a
+        // 128 MiB upload). Free the idle staging buffers and try again, then wait for the GPU so
+        // the ones it was still reading are idle too. Those handed out in the current tick may
+        // feed commands not recorded yet (the caller's input while it asks for its output): they
+        // move to the tick after Finish, so they are neither freed nor handed out again.
+        ReleaseIdleBuffers();
+        buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+        if (!buffer) {
+            const u64 current_tick = scheduler.CurrentTick();
+            scheduler.Finish();
+            const u64 next_tick = scheduler.CurrentTick();
+            for (StagingBuffersCache* const cache :
+                 {&device_local_cache, &upload_cache, &download_cache}) {
+                for (StagingBuffers& staging : *cache) {
+                    for (StagingBuffer& entry : staging.entries) {
+                        if (!entry.deferred && entry.tick >= current_tick) {
+                            entry.tick = next_tick;
+                        }
+                    }
+                }
+            }
+            for (u64& sync_tick : sync_ticks) {
+                if (sync_tick >= current_tick) {
+                    sync_tick = next_tick;
+                }
+            }
+            ReleaseIdleBuffers();
+            buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+        }
+    }
+    if (!buffer) {
+        static u32 logged{};
+        if (logged++ == 0) {
+            LogMemoryTrace(device);
+        }
+        // The GPU is idle after Finish, so the stream buffer after its last range is free. The
+        // ranges before it may hold data for commands not recorded yet, so it does not wrap.
+        if (usage != MemoryUsage::Upload || deferred || iterator + size >= stream_buffer_size) {
+            LOG_CRITICAL(Render_Vulkan, "No memory for a {} byte staging buffer (usage {})", size,
+                         static_cast<u32>(usage));
+            throw vk::Exception(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        }
+        if (logged <= 32) {
+            LOG_ERROR(Render_Vulkan,
+                      "No memory for a {} byte upload buffer; using the stream buffer", size);
+        }
+        const size_t offset = iterator;
+        free_iterator = (std::max)(free_iterator, offset + size);
+        iterator = Common::AlignUp(offset + size, MAX_ALIGNMENT);
+        return StagingBufferRef{
+            .buffer = *stream_buffer,
+            .device_address = stream_buffer_address,
+            .offset = static_cast<VkDeviceSize>(offset),
+            .mapped_span = stream_pointer.subspan(offset, size),
+            .usage{},
+            .log2_level{},
+            .index{},
+        };
+    }
     if (device.HasDebuggingToolAttached()) {
         ++buffer_index;
         buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());
@@ -408,6 +471,18 @@ u64 StagingBufferPool::CachedBytes(MemoryUsage usage) {
         }
     }
     return bytes;
+}
+
+void StagingBufferPool::ReleaseIdleBuffers() {
+    for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (StagingBuffers& staging : *cache) {
+            std::erase_if(staging.entries, [this](const StagingBuffer& entry) {
+                return !entry.deferred && scheduler.IsFree(entry.tick);
+            });
+            staging.delete_index = 0;
+            staging.iterate_index = 0;
+        }
+    }
 }
 
 void StagingBufferPool::ReleaseCache(MemoryUsage usage) {

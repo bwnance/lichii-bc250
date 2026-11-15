@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
@@ -312,7 +311,7 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
     {
         static const u64 recycle_cap = [] {
             const char* value = std::getenv("EDEN_NX2_IMAGE_RECYCLE_MIB");
-            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{0}) << 20;  // v12: off by default (1 reuse per castle run, 227 MiB held)
+            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{256}) << 20;  // on: Castle Town play allocated 1.8-5 GB per 10 s without it (0.5-1.4 with)
         }();
         std::scoped_lock lock{g_image_pool.mutex};
         if (recycle_cap != 0 && g_image_pool.allocator == nullptr) {
@@ -481,6 +480,8 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         return result;
     }
 
+    NoteHostPlacement(allocation, alloc_info.size, true);
+
     // Log GPU memory allocation for images
     if (GPU::Logging::IsActive() &&
         Settings::values.gpu_log_memory_tracking.GetValue()) {
@@ -504,6 +505,47 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     image = vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
                       device.GetDispatchLoader());
     return VK_SUCCESS;
+}
+
+void MemoryAllocator::NoteHostPlacement(VmaAllocation allocation, VkDeviceSize size,
+                                        bool is_image) const {
+    // With the device heap over its budget, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE does not fail:
+    // it takes a memory type of the host heap instead, so none of the out-of-memory paths above
+    // runs and the texture cache never hears of it. RTX 4050 Laptop (6 GB, ~4.75 GB budget) in
+    // title 1's Castle Town: 288-424 MiB of images and buffers ended up in a host type with no
+    // property flags and the frame rate halved (50-57 -> 20-26 fps), with "out of memory 0 MiB"
+    // all along. On an integrated GPU every heap is the same memory.
+    if (allocation == VK_NULL_HANDLE || device.IsIntegrated()) {
+        return;
+    }
+    VkMemoryPropertyFlags flags{};
+    vmaGetAllocationMemoryProperties(allocator, allocation, &flags);
+    if ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+        return;
+    }
+    const u64 total = spilled_bytes.fetch_add(size, std::memory_order_relaxed) + size;
+    // Not a pressure event: each of those keeps 512 MiB more free, and counting spills as such
+    // (one every 2 s) took the margin to 1.5 GiB while a scene loaded on that laptop and kept
+    // the cache under the scene's working set for minutes (ASTC decodes 55/s -> 950/s). The
+    // texture cache takes the bytes and sizes its answer to them (TextureCache::TickFrame).
+    spill_pending.fetch_add(size, std::memory_order_relaxed);
+    // The first ones, then at most one every 2 s.
+    constexpr s64 Interval = std::chrono::nanoseconds{std::chrono::seconds{2}}.count();
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    bool log = spill_logged.fetch_add(1, std::memory_order_relaxed) < 32;
+    if (!log) {
+        s64 last = last_spill_log.load(std::memory_order_relaxed);
+        log = now - last >= Interval &&
+              last_spill_log.compare_exchange_strong(last, now, std::memory_order_relaxed);
+    }
+    if (log) {
+        LOG_WARNING(Render_Vulkan,
+                    "Device-local {} of {} KiB placed in host memory (device heap over budget; "
+                    "{} MiB so far)",
+                    is_image ? "image" : "buffer", size >> 10, total >> 20);
+    }
 }
 
 vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased) const {
@@ -605,6 +647,22 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
 }
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+    vk::Buffer buffer;
+    vk::Check(AllocateBuffer(ci, usage, buffer));
+    return buffer;
+}
+
+vk::Buffer MemoryAllocator::TryCreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+    vk::Buffer buffer;
+    const VkResult result = AllocateBuffer(ci, usage, buffer);
+    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+        vk::Check(result);
+    }
+    return buffer;
+}
+
+VkResult MemoryAllocator::AllocateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
+                                         vk::Buffer &buffer) const {
     // MESA will do memcpy() if not marked as host cached, so just force mark it for most buffers
     auto const anv_flags = (usage == MemoryUsage::Stream
         && device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
@@ -628,7 +686,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     if (!CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info)) {
         VkResult result =
             vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
-        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
             // Over the device memory budget, as images are in CreateImage: buffers have no
             // unbacked fallback, and the vk::Exception a failed staging or buffer cache
             // allocation throws from the GPU thread aborts the process. Phones share RAM with
@@ -651,9 +709,14 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
             relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
             result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
         }
-        vk::Check(result);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
+    if (usage == MemoryUsage::DeviceLocal) {
+        NoteHostPlacement(allocation, alloc_info.size, false);
+    }
 
     // Log GPU memory allocation for buffers
     if (GPU::Logging::IsActive() &&
@@ -674,8 +737,9 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         .offset = alloc_info.offset,
         .memory_type = alloc_info.memoryType,
     };
-    return vk::Buffer(handle, *device.GetLogical(), allocator, allocation, mapped_data, is_coherent,
-                      location, device.GetDispatchLoader());
+    buffer = vk::Buffer(handle, *device.GetLogical(), allocator, allocation, mapped_data,
+                        is_coherent, location, device.GetDispatchLoader());
+    return VK_SUCCESS;
 }
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
@@ -711,6 +775,9 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
                                            &allocation, &alloc_info));
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
+    if (usage == MemoryUsage::DeviceLocal) {
+        NoteHostPlacement(allocation, alloc_info.size, false);
+    }
 
     u8 *data = reinterpret_cast<u8 *>(alloc_info.pMappedData);
     std::span<u8> mapped_data{};

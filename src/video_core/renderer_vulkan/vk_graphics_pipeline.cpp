@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -22,7 +21,6 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
 #include "common/bit_field.h"
-#include "common/scope_exit.h"
 #include "common/zstd_compression.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -654,8 +652,9 @@ GraphicsPipeline::GraphicsPipeline(
                 .count = emulation_buffers,
                 .is_written = true,
             });
-            descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, set_layout, bank_infos);
+            descriptor_allocator = descriptor_pool.Allocator(device, scheduler, set_layout,
+                                                             bank_infos,
+                                                             builder.UsesUpdateAfterBindPool());
             if (mesh_emulation->has_task) {
                 // The distribution pass: payload, offsets, map and arguments, plus its push
                 // constants (Shader::Backend::SPIRV::MeshEmulationDistributionConstants).
@@ -698,40 +697,39 @@ GraphicsPipeline::GraphicsPipeline(
                                                          });
             }
         } else if (!uses_push_descriptor) {
-            descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, set_layout, stage_infos);
+            descriptor_allocator = descriptor_pool.Allocator(device, scheduler, set_layout,
+                                                             stage_infos,
+                                                             builder.UsesUpdateAfterBindPool());
         }
     }
 
     // Shader cache v2: the emission is the CPU stage of the build's job.
     std::function<void()> emit;
     if (build_queue.jobs && emit_stages) {
-        emit = [this, shader_notify, emit_stages = std::exchange(emit_stages, {})] {
+        emit = [this, emit_stages = std::exchange(emit_stages, {})] {
             try {
                 spirv = emit_stages();
             } catch (const Shader::Exception& exception) {
                 LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(),
                           exception.what());
-                if (shader_notify) {
-                    shader_notify->MarkShaderComplete();
-                }
-                throw;
-            } catch (...) {
-                if (shader_notify) {
-                    shader_notify->MarkShaderComplete();
-                }
                 throw;
             }
         };
     }
-    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
+    // The build counts as complete once its task is released, run or not: one dropped before it
+    // ran (a failed emission, a queued build cancelled with its pipeline) is balanced too.
+    struct CompleteOnRelease {
+        explicit CompleteOnRelease(VideoCore::ShaderNotify& notify_) : notify{notify_} {}
+        ~CompleteOnRelease() {
+            notify.MarkShaderComplete();
+        }
+        VideoCore::ShaderNotify& notify;
+    };
+    auto func{[this, &render_pass_cache, pipeline_statistics,
+                complete = shader_notify ? std::make_shared<CompleteOnRelease>(*shader_notify)
+                                         : nullptr,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
-        SCOPE_EXIT {
-            if (shader_notify) {
-                shader_notify->MarkShaderComplete();
-            }
-        };
         try {
             if (emit_stages) {
                 spirv = emit_stages();
@@ -1094,6 +1092,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                      Spec::has_images);
         if (memo_hit && verify_memo) {
             texture_cache.LogPrepares(nullptr, false);
+            // The dry memo pass skipped PrepareImage, and guest memory can change while the
+            // full resolve runs: drop the memo hit when preparing deleted images or the inputs
+            // moved since ResolveMemoizedTextures.
+            if (!texture_cache.TextureMemoStillHolds(
+                    texture_memo, std::span(handle_addresses.data(), handle_addresses.size()))) {
+                texture_memo.valid = false;
+                memo_hit = false;
+            }
         }
     }
     if (use_memo) {
@@ -1584,7 +1590,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
         if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
+            scheduler.Record([this](vk::CommandBuffer) {
+                const VideoCommon::Nx2Profile::Scope scope{
+                    VideoCommon::Nx2Profile::Zone::PipelineWait};
+                build->Wait(!worker_only_build);
+            });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
@@ -2295,7 +2305,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 : StageFlag(info, MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage)))};
         // Votes, ballots and shuffles span the guest's 32-thread warp. A driver free to pick a
         // narrower subgroup (Intel runs mesh shaders SIMD16) splits the warp and breaks them.
-        const bool uses_warp_ops = info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
+        const bool uses_warp_ops = info.demoted_conditional_barrier || info.uses_subgroup_vote ||
+                                   info.uses_subgroup_invocation_id ||
                                    info.uses_subgroup_shuffles || info.uses_subgroup_mask;
         const bool force_warp_size = !emulated_vertex && uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
                                      device.IsGuestWarpSizeSupported(stage_flag);

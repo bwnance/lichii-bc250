@@ -140,7 +140,7 @@ jobs:
       - name: Build eden-cli and the GUI
         run: |
           ccache --zero-stats
-          cmake --build build --target yuzu-cmd yuzu --parallel
+          cmake --build build --target lichii-cmd lichii --parallel
           ccache --show-stats
           test -x build/bin/eden-cli
           test -x build/bin/lichii

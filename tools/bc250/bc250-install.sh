@@ -1183,6 +1183,51 @@ Keys and firmware go where upstream expects them (~/.local/share/eden/keys,
 nand/system/Contents/registered); you must dump them from your own console.
 DONE
 
+# --- System settings check (warnings only, nothing is changed) ----------------
+# The README's setup steps tune the kernel for this board; an update never applies them. Compare
+# what is live with what the README recommends and say which step to redo.
+check_system() {
+    local warn=0 v
+    say() { printf "\033[1;33m[lichii-bc250] check:\033[0m %s\n" "$*"; warn=1; }
+    v=$(awk '/^MemTotal:/{print int($2/1048576+0.5)}' /proc/meminfo 2>/dev/null)
+    [ -n "$v" ] && [ "$v" -lt 14 ] &&
+        say "only ${v} GB of RAM visible: the BC-250 is meant to run with 512 MB of VRAM (README step 1, UMA_SIZE 512)"
+    v=$(cat /proc/sys/vm/swappiness 2>/dev/null)
+    [ -n "$v" ] && [ "$v" != 10 ] &&
+        say "vm.swappiness is $v, recommended 10 (README step 2)"
+    v=$(cat /proc/sys/vm/compaction_proactiveness 2>/dev/null)
+    [ -n "$v" ] && [ "$v" != 100 ] &&
+        say "vm.compaction_proactiveness is $v, recommended 100 (README step 3)"
+    v=$(cat /proc/sys/vm/watermark_scale_factor 2>/dev/null)
+    if [ -n "$v" ] && [ "$v" != 300 ]; then
+        if [ "$v" -gt 300 ] 2>/dev/null; then
+            say "vm.watermark_scale_factor is $v, recommended 300: higher values push the game's memory to swap and stutter in long sessions (README step 4)"
+        else
+            say "vm.watermark_scale_factor is $v, recommended 300: lower values make area loads freeze for 6-14 s (README step 4)"
+        fi
+    fi
+    if [ "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null)" != Y ]; then
+        say "zswap is off (README step 5)"
+    else
+        v=$(cat /sys/module/zswap/parameters/compressor 2>/dev/null)
+        [ -n "$v" ] && [ "$v" != zstd ] &&
+            say "zswap compressor is $v, recommended zstd (README step 5)"
+    fi
+    awk 'NR > 1 && $1 !~ /zram/ {f=1} END {exit !f}' /proc/swaps 2>/dev/null ||
+        say "no disk swapfile behind zswap (README step 5)"
+    grep -q 'ttm.pages_limit=' /proc/cmdline 2>/dev/null ||
+        say "optional: no larger GPU memory limit (ttm.pages_limit, README step 6)"
+    if command -v oomctl >/dev/null && ! oomctl 2>/dev/null | grep -q 'user@'; then
+        say "optional: no systemd-oomd safety net for the game (README step 10)"
+    fi
+    if [ "$warn" = 0 ]; then
+        log "system settings match the README's recommendations"
+    else
+        log "the lines above are recommendations only: the installer changed none of them"
+    fi
+}
+check_system
+
 # --- 4. Steam shortcut (optional) --------------------------------------------
 if [ "$WITH_SHORTCUT" = 1 ]; then
     if [ -z "$GAME_PATH" ]; then

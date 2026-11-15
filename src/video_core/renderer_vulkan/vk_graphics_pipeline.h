@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -152,6 +151,13 @@ public:
     u64 DynamicAttributeTypes() const noexcept { return key.state.attribute_types; }
     const std::array<u64, 6>& ShaderHashes() const noexcept {
         return key.unique_hashes;
+    }
+    const GraphicsPipelineCacheKey& Key() const noexcept {
+        return key;
+    }
+    /// Each stage's SPIR-V (zstd), kept once the pipeline is built; empty for absent stages.
+    const std::array<std::vector<u8>, NUM_STAGES>& KeptSpirv() const noexcept {
+        return kept_spirv;
     }
 
     struct SampledImage {

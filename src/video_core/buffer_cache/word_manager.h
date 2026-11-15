@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -212,7 +211,12 @@ struct WordManager {
             hot_frame = frame;
             std::fill_n(heap.data() + size_t(Type::HotClean) * num_words, num_words, u64{0});
         }
-        const u32 now = frame >> 7;
+        // EDEN_NX2_HOT_EPOCH_SHIFT=<n>: hot pages are forgotten every 2^n frames (default 7)
+        static const u32 epoch_shift = [] {
+            const char* value = std::getenv("EDEN_NX2_HOT_EPOCH_SHIFT");
+            return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 7U;
+        }();
+        const u32 now = frame >> epoch_shift;
         if (now != hot_epoch) {
             hot_epoch = now;
             std::fill_n(heap.data() + size_t(Type::Hot) * num_words, num_words, u64{0});

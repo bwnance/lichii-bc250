@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -33,6 +32,7 @@ struct HostTranslateInfo {
     u32 max_descriptor_set_sampled_images{};
     u32 max_descriptor_set_storage_images{};
     u32 max_descriptor_set_input_attachements{};
+    u32 max_compute_shared_memory_size{}; ///< Zero when unknown
     bool support_float64{};      ///< True when the device supports 64-bit floats
     bool support_float16{};      ///< True when the device supports 16-bit floats
     bool support_int64{};        ///< True when the device supports 64-bit integers
@@ -50,6 +50,7 @@ struct HostTranslateInfo {
     /// array of the table's entries (not OpenGL: its pipelines bind at most 64 textures; Vulkan
     /// only with nonuniform sampled image array indexing)
     bool support_handle_table_arrays{};
+    bool needs_lrz_disable{}; ///< True when fragment shaders must write depth to turn off LRZ
 
     /// The properties that change which values translation reads from the environment, a bit
     /// each: those deciding a pass that reads values, or a pass that changes the program before

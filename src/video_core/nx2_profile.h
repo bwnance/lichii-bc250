@@ -76,6 +76,10 @@ enum class Zone : u32 {
     PresentWait,          ///< Present waits for the Vulkan worker or a free presentation frame
     QueueSubmit,          ///< vkQueueSubmit
     PresentFence,         ///< A free presentation frame waits for its last present's fence
+    ComputeStorage,       ///< A dispatch reads and sizes its storage buffer bindings
+    ComputeImages,        ///< A dispatch's texture handles, image views and texture buffers
+    ComputeBuffers,       ///< A dispatch's buffer lookups, uploads, write marks and binds
+    ComputeDownloads,     ///< Early read downloads recorded right behind a dispatch
     Count,
 };
 
@@ -90,7 +94,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait", "graphics pipeline miss",
     "compute pipeline miss", "pipeline wait", "shader capture", "texture cache", "GPU wait",
     "present", "worker idle",
-    "present wait", "queue submit", "present fence",
+    "present wait", "queue submit", "present fence", "compute storage", "compute images", "compute buffers",
+    "compute downloads",
 };
 
 static_assert(static_cast<size_t>(Zone::Count) <= StutterTrace::ZoneSlots);

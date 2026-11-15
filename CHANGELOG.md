@@ -4,6 +4,60 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v15 — 2026-11-15: a 768 MB memory leak fixed, faster start-up, latest Lichii
+
+- **Fixed a memory leak that grew all session.** The emulator kept a record of every GPU compute
+  upload and only cleared it for one kind of compute launch, which Ocarina doesn't use: 24 bytes per
+  upload, never freed, 768 MB after ~90 minutes of play (found with a memory profiler in a real play
+  session; about 40% of the emulator's memory growth). That memory pushed the rest of the game into
+  swap in long sessions. It now stays under 100 KB.
+- **Merged the latest Lichii** (55 upstream changes after build 228). For Ocarina on the BC-250:
+  start-up waits only for the shaders of your last two sessions and builds older ones in the
+  background (the start-up shader list grew with every session), Ocarina upscale and output shaders
+  recognised by their program, cheaper write traps on pages without textures, early read-back
+  downloads kept for pages the game reads every few frames, staging buffers that degrade instead of
+  aborting when memory runs out, and gyro that survives a controller reconnect.
+- Kept from this fork where upstream changed the same code: 64 MiB ASTC decode chunks and the
+  transcode memory limits, the present-fence profile zone, fast-draw handling of macro memory reads.
+
+### v14 — 2026-11-15: Lichii build 228, and a memory setting that stops long-session stutter
+
+- **Update your watermark setting to 300** (README setup step 4). The earlier recommendation, 1000,
+  kept ~3 GB of RAM free at all times, so the kernel kept pushing the game's own memory out to swap
+  and reading it back: in a long session v13 dropped to 53-56 fps with a 1-9 s pause every minute or
+  two after ~15 minutes. With 300 the same kind of session read ~10x less back from swap and held
+  58-60 fps (Lake Hylia, fishing pond, Zora's Domain, Jabu-Jabu); area entries freeze ~1 s longer.
+- **The installer now checks the README's system settings** at the end of every install or update
+  and warns about any that differ (RAM split, swappiness, compaction, watermark, zram, swapfile, and
+  the optional GPU memory limit and oomd). It changes none of them.
+- **Merged Lichii build 228** (152 upstream changes since build 177). For Ocarina on the BC-250 the
+  ones that matter: Mesa keeps its own shader cache instead of a second copy in the emulator (#1653),
+  fewer waits when the game reads GPU results back (#1795), the ocarina-warp freeze fix (#1218),
+  compute shader rebuilds on a worker (#995), guest cores no longer block on frame fences (#1639),
+  the cloth/hair speed and other FPS Unlock fixes. Castle route A/B against v13: about the same.
+- Kept from this fork where upstream changed the same code: the BC-250 mesh fallback, non-blocking
+  occlusion reads on RADV, the texture-cache budget fix from v13, 64 MiB ASTC decode chunks, the
+  Bluetooth controller stand-in, and background shader translation.
+
+### v13 — 2026-11-15: smoother Castle Town: no texture-cache thrash, ~1 GB less at loads
+
+Measured on the BC-250 castle route (3 alternating runs each): route 49.5-52.9 -> 55.1-55.9 fps,
+repeated frames 7.8-10.4 -> 5.3-5.5 per second, second plaza visit 48-55.5 -> 56.4-58.7 fps, field
+and town 57.8-60 fps.
+
+- **Texture cache no longer thrashes in busy places.** The installer's texture-cache limits were
+  compared with *all* GPU memory, not just textures, so in Castle Town (~4 GB of GPU memory in use)
+  the cache thought it was always full and threw away textures still in use: 1,100-2,300 re-uploads
+  and up to ~1,000 texture conversions every 10 s. The limits now count textures only.
+- **About 1.1 GB less memory at area loads.** Buffers the emulator had already deleted stayed
+  allocated for 8 more frames, and an area load is one frame several seconds long: 1.2-1.3 GB held
+  at the Castle Town peak. They are now freed as soon as the GPU is done with them (peak ~120 MiB).
+  Texture-decoding scratch memory is capped lower too (64 MiB).
+- **The image reuse pool is back on** (v12 turned it off by mistake): without it, play in Castle
+  Town allocated and freed 1.8-5 GB of GPU memory every 10 s.
+- New diagnostics: `EDEN_NX2_PROTECT_STATS=1` (memory-protection calls by site), deleted-buffer
+  peak in the buffer-cache log line.
+
 ### v12 — 2026-11-15: steadier play in big areas, about 0.6 GB less GPU memory, no runaway Steam cache
 
 - **Steam's shader pre-cache no longer fills the disk.** Steam records every pipeline a game

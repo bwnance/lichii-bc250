@@ -95,6 +95,23 @@ constexpr size_t ScarecrowLastHookOffset = sizeof(Loader::NSOHeader) + 0x32926C8
 constexpr u32 ScarecrowLastHookInstruction = 0x1426D104; // b main+0x3C46AD8
 constexpr size_t ScarecrowLastRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46AD8;
 constexpr size_t ScarecrowRoutineSize = 40;
+struct ClothDtSite {
+    size_t offset;
+    u32 original;
+    u32 hook;
+};
+// The cloth time step's four 1/60 loads, each a call to the s0 or s2 routine.
+constexpr std::array<ClothDtSite, 4> ClothDtSites{{
+    {sizeof(Loader::NSOHeader) + 0x14632C, 0xBD466D00, 0x94EC01F5},  // ldr s0 -> bl 0x3C46B00
+    {sizeof(Loader::NSOHeader) + 0x2AB804, 0x1E270100, 0x94E66CBF},  // fmov s0, w8 -> bl 0x3C46B00
+    {sizeof(Loader::NSOHeader) + 0x2C207A4, 0xBD466D00, 0x944098D7}, // ldr s0 -> bl 0x3C46B00
+    {sizeof(Loader::NSOHeader) + 0x2C2208C, 0xBD466D02, 0x944092A9}, // ldr s2 -> bl 0x3C46B30
+}};
+constexpr size_t ClothDtRoutineS0Offset = sizeof(Loader::NSOHeader) + 0x3C46B00;
+constexpr size_t ClothDtRoutineS2Offset = sizeof(Loader::NSOHeader) + 0x3C46B30;
+constexpr size_t ClothDtRoutineSize = 48;
+constexpr std::string_view ClothDtRoutineHead =
+    "D0810090104A44F9100240F9111A40B9101191521091A772310600513F02106B3132901A31060011";
 
 constexpr size_t StepRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46900;
 constexpr size_t StepStateSize = 0x1C0;
@@ -339,6 +356,9 @@ std::vector<u8> MakeDynamicMain() {
                 sizeof(u32));
     std::memcpy(nso.data() + ScarecrowLastHookOffset, &ScarecrowCutOriginalInstruction,
                 sizeof(u32));
+    for (const auto& site : ClothDtSites) {
+        std::memcpy(nso.data() + site.offset, &site.original, sizeof(u32));
+    }
     return nso;
 }
 
@@ -419,6 +439,15 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
                 std::span{patched}.subspan(ScarecrowLastRoutineOffset, ScarecrowRoutineSize)) ==
             "ED3BBDA9EF4301A9FE1300F98DF21791A6FFFF97E8030D2AFE1340F9EF4341A9ED3BC3A8"
             "F42ED917");
+    for (const auto& site : ClothDtSites) {
+        REQUIRE(WordAt(patched, site.offset) == site.hook);
+    }
+    REQUIRE(Common::HexToString(std::span{patched}.subspan(ClothDtRoutineS0Offset,
+                                                           ClothDtRoutineSize)) ==
+            std::string{ClothDtRoutineHead} + "2002271EC0035FD6");
+    REQUIRE(Common::HexToString(std::span{patched}.subspan(ClothDtRoutineS2Offset,
+                                                           ClothDtRoutineSize)) ==
+            std::string{ClothDtRoutineHead} + "2202271EC0035FD6");
     REQUIRE(WordAt(patched) == BranchInstruction);
     REQUIRE(water_patched(patched));
     REQUIRE(sound_gate_patched(patched));
@@ -453,6 +482,12 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
     REQUIRE(WordAt(patched, ScarecrowRecordRoutineOffset) == 0);
     REQUIRE(WordAt(patched, ScarecrowLastHookOffset) == ScarecrowCutOriginalInstruction);
     REQUIRE(WordAt(patched, ScarecrowLastRoutineOffset) == 0);
+    // Dark's step never drops below 1.0, so the cloth time step stays 1/60.
+    for (const auto& site : ClothDtSites) {
+        REQUIRE(WordAt(patched, site.offset) == site.original);
+    }
+    REQUIRE(WordAt(patched, ClothDtRoutineS0Offset) == 0);
+    REQUIRE(WordAt(patched, ClothDtRoutineS2Offset) == 0);
 
     // Both unchecked: hook and code cave stay untouched.
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{FpsUnlock},
@@ -847,6 +882,30 @@ TEST_CASE("Built-in FPS Unlock validates the Scarecrow's Song records before wri
     REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
 }
 
+TEST_CASE("Built-in FPS Unlock validates the cloth time step records before writing",
+          "[patch_manager]") {
+    PatchManagerTestContext context;
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution},
+                                                        std::string{DynamicFps}};
+    auto nso = MakeDynamicMain();
+    SECTION("Wrong ldr s0 original") {
+        nso[ClothDtSites[0].offset] ^= 1;
+    }
+    SECTION("Wrong fmov original") {
+        nso[ClothDtSites[1].offset] ^= 1;
+    }
+    SECTION("Wrong ldr s2 original") {
+        nso[ClothDtSites[3].offset] ^= 1;
+    }
+    SECTION("Nonzero s0 cave") {
+        nso[ClothDtRoutineS0Offset + ClothDtRoutineSize - 1] = 1;
+    }
+    SECTION("Nonzero s2 cave") {
+        nso[ClothDtRoutineS2Offset + ClothDtRoutineSize - 1] = 1;
+    }
+    REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+}
+
 TEST_CASE("Built-in FPS Unlock leaves all records alone when a user mod changes the Scarecrow's "
           "Song fix",
           "[patch_manager]") {
@@ -899,4 +958,58 @@ TEST_CASE("Built-in Texture Pool x2 doubles the allocator's initial pool size",
     patched = manager.PatchNSO(nso, "main");
     REQUIRE(WordAt(patched, CallOffset) == NopInstruction);
     REQUIRE(WordAt(patched, RoutineOffset) == 0);
+}
+
+TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_manager]") {
+#ifdef EGLANTINE_STREAMLINE
+    constexpr bool DlssBuild = true;
+#else
+    constexpr bool DlssBuild = false;
+#endif
+    constexpr size_t ScaleOffset = sizeof(Loader::NSOHeader) + 0x806420;
+    constexpr u32 ScaleOne = 0x52A7F009;
+    struct SettingsGuard {
+        ~SettingsGuard() {
+            Settings::values.nvidia_dlss.SetValue(false);
+            Settings::values.nvidia_dlss_quality.SetValue(Settings::NvidiaDlssQuality::Automatic);
+            Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
+        }
+    } guard;
+    PatchManagerTestContext context;
+    auto nso = MakeMain(OcarinaBuildId, TbzInstruction);
+    nso.resize(ScaleOffset + sizeof(u32));
+    std::memcpy(nso.data() + ScaleOffset, &ScaleOne, sizeof(ScaleOne));
+    const auto scale = [&] { return WordAt(context.Manager().PatchNSO(nso, "main"), ScaleOffset); };
+
+    Settings::values.nvidia_dlss.SetValue(true);
+    Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Docked);
+    using Quality = Settings::NvidiaDlssQuality;
+    for (const auto& [quality, word] : std::array<std::pair<Quality, u32>, 6>{{
+             {Quality::Automatic, ScaleOne},
+             {Quality::Native, ScaleOne},
+             {Quality::Quality, ScaleOne},
+             {Quality::Balanced, 0x52A7EBE9},
+             {Quality::Performance, 0x52A7E809},
+             {Quality::UltraPerformance, 0x52A7E009},
+         }}) {
+        Settings::values.nvidia_dlss_quality.SetValue(quality);
+        CHECK(scale() == (DlssBuild ? word : ScaleOne));
+        CHECK(Settings::AppliedOcarinaRenderScale() ==
+              (DlssBuild && word != ScaleOne ? std::optional{quality} : std::nullopt));
+    }
+
+    Settings::values.nvidia_dlss_quality.SetValue(Quality::Performance);
+    Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
+    CHECK(scale() == ScaleOne);
+    Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Docked);
+    Settings::values.nvidia_dlss.SetValue(false);
+    CHECK(scale() == ScaleOne);
+    Settings::values.nvidia_dlss.SetValue(true);
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
+    CHECK(scale() == ScaleOne);
+    CHECK_FALSE(Settings::AppliedOcarinaRenderScale());
+
+    for (const auto& patch : context.Manager().GetPatches()) {
+        CHECK(patch.name.find("render scale") == std::string::npos);
+    }
 }

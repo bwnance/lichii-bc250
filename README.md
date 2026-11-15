@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v12
+# lichii-bc250 v15
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -95,19 +95,23 @@ and survive its updates.
 
    **Check:** `cat /proc/sys/vm/compaction_proactiveness` shows `100`, also after a reboot.
 
-4. **Keep 1.5 GB of RAM free ahead of time: watermark scale factor 1000.** A big area load needs
+4. **Keep some RAM free ahead of time: watermark scale factor 300.** A big area load needs
    gigabytes of GPU memory at once (Ocarina's Castle Town: about 3 GB in 30 s). With the kernel's
-   default (125) it keeps only ~190 MB free, so every one of those allocations waits while the
-   kernel compresses other memory into swap: a 10-14 s freeze on the first visit. With 1000 the
-   kernel's background thread keeps ~1.5 GB free, and the same entry freezes for 2-3 s:
+   default (125) it keeps only ~190 MB free, so every one of those allocations waits while
+   the kernel compresses other memory into swap: a 6-14 s freeze on the first visit. 300 brings
+   that down to 3-4 s. Higher values shorten it a little more (1000: 2-3 s), but then the kernel
+   keeps pushing the game's own memory out to swap to hold all that RAM free, and play stutters:
+   in a long session 1000 read about 10x more back from swap than 300 and dropped to 53-56 fps,
+   where 300 held 58-60.
 
    ```sh
-   printf 'vm.watermark_scale_factor = 1000\n' > /tmp/watermark.conf
+   printf 'vm.watermark_scale_factor = 300\n' > /tmp/watermark.conf
    sudo install -m 644 /tmp/watermark.conf /etc/sysctl.d/99-bc250-watermark.conf
    sudo sysctl --system
    ```
 
-   **Check:** `cat /proc/sys/vm/watermark_scale_factor` shows `1000`, also after a reboot.
+   **Check:** `cat /proc/sys/vm/watermark_scale_factor` shows `300`, also after a reboot. Coming from
+   an earlier version with 1000: run the three lines above again.
 
 5. **Compressed swap in RAM with zstd, plus a disk swapfile.** The BC250 Toolkit sets up zswap
    (a compressed cache in RAM in front of a 16 GB swapfile) but chooses `lz4`, which only fits
@@ -330,7 +334,7 @@ The numbers above were measured on this setup (step 1 with all the optional item
 |---|---|
 | OS | Bazzite (62fixolab BC-250 image), Gaming Mode at 1920x1080 |
 | Memory | 16 GB total, UMA carve-out 512 MB (~15.2 GB system RAM) |
-| Swap | zram (zstd, 3/4 of RAM) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100`, `vm.watermark_scale_factor=1000` |
+| Swap | zram (zstd, 3/4 of RAM) plus a 16 GB disk swapfile, `vm.swappiness=10`, `vm.compaction_proactiveness=100`, `vm.watermark_scale_factor=300` |
 | CPU | 8 cores / 16 threads (stock boots with 6 cores) |
 | GPU | 40 compute units, governor 500-2000 MHz |
 | GPU memory limit | `ttm.pages_limit=3145728` (12 GB) |

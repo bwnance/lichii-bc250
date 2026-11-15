@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include "common/assert.h"
@@ -63,12 +63,34 @@ struct BuiltinPatch {
     size_t state_size = 0;
     // Another built-in this one contains; it is skipped once this one is applied.
     std::string_view replaces{};
+    // Applies only with NVIDIA DLSS on at this quality in docked mode, and is not listed in
+    // Add-Ons.
+    std::optional<Settings::NvidiaDlssQuality> dlss_quality{};
 };
+
+constexpr std::string_view MAX_RESOLUTION_NAME = "Max Resolution (built-in)";
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
 constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14};
 constexpr std::array MAX_RESOLUTION_RECORDS{
     BuiltinPatchRecord{0x805BD0, MAX_RESOLUTION_BRANCH, MAX_RESOLUTION_ORIGINAL},
+};
+
+// ProfessorTee's render scales (#903): Max Resolution's fixed-scale path returns 1.0 of 2560x1440
+// (main+0x806420: mov w9, #0x3f800000), which DLSS takes to 4K as Quality. The lower scales give
+// the other modes' render sizes.
+constexpr std::array<u8, 4> RENDER_SCALE_ONE{0x09, 0xF0, 0xA7, 0x52};         // 1.0
+constexpr std::array<u8, 4> RENDER_SCALE_BALANCED{0xE9, 0xEB, 0xA7, 0x52};    // 0.871, 2276x1280
+constexpr std::array<u8, 4> RENDER_SCALE_PERFORMANCE{0x09, 0xE8, 0xA7, 0x52}; // 0.75, 1920x1080
+constexpr std::array<u8, 4> RENDER_SCALE_ULTRA{0x09, 0xE0, 0xA7, 0x52};       // 0.5, 1280x720
+constexpr std::array RENDER_BALANCED_RECORDS{
+    BuiltinPatchRecord{0x806420, RENDER_SCALE_BALANCED, RENDER_SCALE_ONE},
+};
+constexpr std::array RENDER_PERFORMANCE_RECORDS{
+    BuiltinPatchRecord{0x806420, RENDER_SCALE_PERFORMANCE, RENDER_SCALE_ONE},
+};
+constexpr std::array RENDER_ULTRA_RECORDS{
+    BuiltinPatchRecord{0x806420, RENDER_SCALE_ULTRA, RENDER_SCALE_ONE},
 };
 
 // RsMan-Dev's texture pool patch: stp x8, x9, [sp, #0x10] stores the graphics allocator's
@@ -317,6 +339,29 @@ constexpr std::array<u8, 40> SCARECROW_LAST_ROUTINE{
     0x17, 0x91, 0xA6, 0xFF, 0xFF, 0x97, 0xE8, 0x03, 0x0D, 0x2A, 0xFE, 0x13, 0x40, 0xF9,
     0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0xF4, 0x2E, 0xD9, 0x17,
 };
+// The cloth update (Havok cloth: clothes, hair, and the wind action's phase) gets its time step as
+// scale * 1/60, without the frame step, at four sites. Above 60 fps every frame still simulates
+// 1/60 s, so cloth and wind run fast (twice as fast at 120 fps). Each 1/60 load becomes a call
+// that returns min(step / 60, 1/60) (1/60 when the step is not positive), so 60 fps and below
+// keep the original value exactly.
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_A{0x00, 0x6D, 0x46, 0xBD}; // ldr s0, [x8, #0x66c]
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_B{0x00, 0x01, 0x27, 0x1E}; // fmov s0, w8
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_D{0x02, 0x6D, 0x46, 0xBD}; // ldr s2, [x8, #0x66c]
+constexpr std::array<u8, 4> CLOTH_DT_CALL_A{0xF5, 0x01, 0xEC, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_B{0xBF, 0x6C, 0xE6, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_C{0xD7, 0x98, 0x40, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_D{0xA9, 0x92, 0x40, 0x94};     // bl main+0x3C46B30
+// x16 = step / 60 bits ; w17 = (bits - 1 < bits(1/60) - 1 ? bits : bits(1/60)) ; fmov s0|s2, w17
+constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S0{
+    0xD0, 0x81, 0x00, 0x90, 0x10, 0x4A, 0x44, 0xF9, 0x10, 0x02, 0x40, 0xF9, 0x11, 0x1A, 0x40, 0xB9,
+    0x10, 0x11, 0x91, 0x52, 0x10, 0x91, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
+    0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x20, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+};
+constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S2{
+    0xD0, 0x81, 0x00, 0x90, 0x10, 0x4A, 0x44, 0xF9, 0x10, 0x02, 0x40, 0xF9, 0x11, 0x1A, 0x40, 0xB9,
+    0x10, 0x11, 0x91, 0x52, 0x10, 0x91, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
+    0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x22, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+};
 constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
@@ -347,13 +392,19 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x3C46AB0, SCARECROW_RECORD_ROUTINE, {}, true},
     BuiltinPatchRecord{0x32926C8, SCARECROW_LAST_HOOK, SCARECROW_CUT_ORIGINAL},
     BuiltinPatchRecord{0x3C46AD8, SCARECROW_LAST_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x14632C, CLOTH_DT_CALL_A, CLOTH_DT_ORIGINAL_A},
+    BuiltinPatchRecord{0x2AB804, CLOTH_DT_CALL_B, CLOTH_DT_ORIGINAL_B},
+    BuiltinPatchRecord{0x2C207A4, CLOTH_DT_CALL_C, CLOTH_DT_ORIGINAL_A},
+    BuiltinPatchRecord{0x2C2208C, CLOTH_DT_CALL_D, CLOTH_DT_ORIGINAL_D},
+    BuiltinPatchRecord{0x3C46B00, CLOTH_DT_ROUTINE_S0, {}, true},
+    BuiltinPatchRecord{0x3C46B30, CLOTH_DT_ROUTINE_S2, {}, true},
 };
 
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
     BuiltinPatch{
-        .name = "Max Resolution (built-in)",
+        .name = MAX_RESOLUTION_NAME,
         .title_id = 0x0400486024DEC000,
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
@@ -390,6 +441,32 @@ constexpr std::array BUILTIN_PATCHES{
         .records = DYNAMIC_FPS_RECORDS,
         .state_offset = 0x4E9FE00,
         .state_size = 0x98,
+    },
+    // The NVIDIA DLSS quality lowers Ocarina's render resolution under Max Resolution, since DLSS
+    // replaces the game's own 1440p -> 4K upscale and takes whatever the game renders.
+    BuiltinPatch{
+        .name = "DLSS Balanced render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_BALANCED_RECORDS,
+        .dlss_quality = Settings::NvidiaDlssQuality::Balanced,
+    },
+    BuiltinPatch{
+        .name = "DLSS Performance render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_PERFORMANCE_RECORDS,
+        .dlss_quality = Settings::NvidiaDlssQuality::Performance,
+    },
+    BuiltinPatch{
+        .name = "DLSS Ultra Performance render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_ULTRA_RECORDS,
+        .dlss_quality = Settings::NvidiaDlssQuality::UltraPerformance,
     },
 };
 
@@ -505,7 +582,7 @@ std::string GetUpdateVersionStringFromSlot(const ContentProvider* provider, u64 
     NACP nacp{nacp_file};
     return nacp.GetVersionString();
 }
-YUZU_NO_INLINE std::optional<u64> GetParentApplicationId(const ContentProvider* provider, u64 title_id) {
+LICHII_NO_INLINE std::optional<u64> GetParentApplicationId(const ContentProvider* provider, u64 title_id) {
     return provider == nullptr ? std::nullopt : provider->GetParentApplicationId(title_id);
 }
 } // Anonymous namespace
@@ -543,7 +620,7 @@ std::vector<std::string> PatchManager::GetDisabledAddons() const {
     return disabled;
 }
 
-VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
+VirtualDir PatchManager::PatchExeFS(VirtualDir exefs, bool apply_update) const {
     LOG_INFO(Loader, "Patching ExeFS for title_id={:016X}", title_id);
 
     if (exefs == nullptr)
@@ -671,9 +748,17 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     }
 
     if (!update_disabled && update != nullptr && update->GetExeFS() != nullptr) {
-        LOG_INFO(Loader, "    ExeFS: Update ({}) applied successfully",
-                 FormatTitleVersion(content_provider.GetEntryVersion(update_tid).value_or(0)));
-        exefs = update->GetExeFS();
+        const auto version =
+            FormatTitleVersion(content_provider.GetEntryVersion(update_tid).value_or(0));
+        if (apply_update) {
+            LOG_INFO(Loader, "    ExeFS: Update ({}) applied successfully", version);
+            exefs = update->GetExeFS();
+        } else {
+            LOG_WARNING(Loader,
+                        "    ExeFS: Ignoring installed update ({}) for {:016X}: the container "
+                        "carries its own program and RomFS",
+                        version, title_id);
+        }
     }
 
     // LayeredExeFS
@@ -699,8 +784,10 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
             continue;
 
         auto exefs_dir = FindSubdirectoryCaseless(subdir, "exefs");
-        if (exefs_dir != nullptr)
+        if (exefs_dir != nullptr) {
+            LOG_INFO(Loader, "    ExeFS: LayeredExeFS mod {} (exefs)", subdir->GetName());
             layers.push_back(std::move(exefs_dir));
+        }
     }
     layers.push_back(exefs);
 
@@ -753,6 +840,9 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
 }
 
 std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name) const {
+    if (name == "main") {
+        Settings::SetAppliedOcarinaRenderScale(std::nullopt);
+    }
     if (nso.size() < sizeof(Loader::NSOHeader)) {
         return nso;
     }
@@ -825,6 +915,18 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             LOG_INFO(Loader, "    - Skipping \"{}\": included in an applied built-in patch",
                      patch.name);
             continue;
+        }
+        if (patch.dlss_quality) {
+#ifdef EGLANTINE_STREAMLINE
+            const bool wanted = Settings::OcarinaDlssRenderScale() == patch.dlss_quality &&
+                                std::find(disabled.cbegin(), disabled.cend(),
+                                          MAX_RESOLUTION_NAME) == disabled.cend();
+#else
+            constexpr bool wanted = false;
+#endif
+            if (!wanted) {
+                continue;
+            }
         }
         if (patch.build_id != build_id) {
             LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
@@ -910,6 +1012,9 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                  patch.records.size(), name);
         if (!patch.replaces.empty()) {
             replaced.push_back(patch.replaces);
+        }
+        if (patch.dlss_quality) {
+            Settings::SetAppliedOcarinaRenderScale(patch.dlss_quality);
         }
     }
 
@@ -1010,6 +1115,7 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
 
     std::vector<VirtualDir> layers;
     std::vector<VirtualDir> layers_ext;
+    std::vector<std::string> mods;
     layers.reserve(patch_dirs.size() + 1);
     layers_ext.reserve(patch_dirs.size() + 1);
     for (const auto& subdir : patch_dirs) {
@@ -1017,23 +1123,20 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
             continue;
         }
 
-        auto romfs_dir = FindSubdirectoryCaseless(subdir, "romfs");
-        if (romfs_dir != nullptr)
-            layers.emplace_back(std::make_shared<CachedVfsDirectory>(std::move(romfs_dir)));
-
+        const auto layer = [&](std::vector<VirtualDir>& out, std::string_view kind) {
+            auto dir = FindSubdirectoryCaseless(subdir, kind);
+            if (dir == nullptr) {
+                return;
+            }
+            out.emplace_back(std::make_shared<CachedVfsDirectory>(std::move(dir)));
+            mods.push_back(fmt::format("{} ({})", subdir->GetName(), kind));
+        };
+        layer(layers, "romfs");
         // Support for romfslite introduced in Atmosphere 1.9.5
-        auto romfslite_dir = FindSubdirectoryCaseless(subdir, "romfslite");
-        if (romfslite_dir != nullptr)
-            layers.emplace_back(std::make_shared<CachedVfsDirectory>(std::move(romfslite_dir)));
-
-        auto ext_dir = FindSubdirectoryCaseless(subdir, "romfs_ext");
-        if (ext_dir != nullptr)
-            layers_ext.emplace_back(std::make_shared<CachedVfsDirectory>(std::move(ext_dir)));
-
+        layer(layers, "romfslite");
+        layer(layers_ext, "romfs_ext");
         if (type == ContentRecordType::HtmlDocument) {
-            auto manual_dir = FindSubdirectoryCaseless(subdir, "manual_html");
-            if (manual_dir != nullptr)
-                layers.emplace_back(std::make_shared<CachedVfsDirectory>(std::move(manual_dir)));
+            layer(layers, "manual_html");
         }
     }
 
@@ -1061,6 +1164,9 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     }
 
     LOG_INFO(Loader, "    RomFS: LayeredFS patches applied successfully");
+    for (const auto& mod : mods) {
+        LOG_INFO(Loader, "    RomFS: LayeredFS mod {}", mod);
+    }
     romfs = std::move(packed);
 }
 
@@ -1469,7 +1575,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id) {
+        if (patch.title_id != title_id || patch.dlss_quality) {
             continue;
         }
         const auto is_disabled = [&](std::string_view name) {
