@@ -18,6 +18,8 @@
 
 #include "dynarmic/backend/block_range_information.h"
 #include "dynarmic/backend/x64/a32_jitstate.h"
+#include "dynarmic/backend/x64/devirtualize.h"
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/emit_x64.h"
 #include "dynarmic/backend/x64/reg_alloc.h"
 #include "dynarmic/frontend/A32/a32_location_descriptor.h"
@@ -48,6 +50,24 @@ class A32EmitX64 final : public EmitX64 {
 public:
     A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_interface);
     ~A32EmitX64() override;
+
+    /// Per-core values as immediates (A64EmitX64 reads them from the JIT state).
+    template<auto mfp>
+    ArgCallback UserCallback() const {
+        return Devirtualize<mfp>(conf.callbacks);
+    }
+    void EmitLoadUserConfig(Xbyak::Reg64 reg) {
+        code.mov(reg, reinterpret_cast<u64>(&conf));
+    }
+    void EmitLoadExclusiveAddressPointer(Xbyak::Reg64 reg) {
+        code.mov(reg, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
+    }
+    void EmitLoadExclusiveValuePointer(Xbyak::Reg64 reg) {
+        code.mov(reg, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
+    }
+    static std::optional<u32> OwnExclusiveAddressOffset() {
+        return std::nullopt;
+    }
 
     /**
      * Emit host machine code for a basic block with intermediate representation `block`.

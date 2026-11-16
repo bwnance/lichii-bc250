@@ -166,6 +166,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 gc_costly_deletes{};
     u64 gc_download_deletes{}; ///< Evictions that downloaded the image first (a full GPU wait)
     u64 gc_kept_gpu_images{}; ///< Collector skips of recent GPU-written images (v9)
+    u64 tc_depth_upload_skips{}; ///< New large depth images not filled from guest memory
     u64 fresh_render_targets{};    ///< New render targets not uploaded (last 600 frames)
     u64 render_targets_created{};  ///< Images a render target binding created (last 600 frames)
     u64 render_targets_uploaded{}; ///< Of those, loaded from guest memory

@@ -18,6 +18,8 @@
 
 #include "dynarmic/backend/block_range_information.h"
 #include "dynarmic/backend/x64/a64_jitstate.h"
+#include "dynarmic/backend/x64/devirtualize.h"
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/emit_x64.h"
 #include "dynarmic/backend/x64/reg_alloc.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
@@ -60,12 +62,41 @@ public:
 
     void InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges);
 
+    /// Per-core values, read from the JIT state so the code serves every core
+    /// (docs/bc250-shared-jit.md). A32EmitX64 has the same helpers with immediates.
+    template<auto mfp>
+    ArgCallback UserCallback() const {
+        return DevirtualizeState<mfp>(conf.callbacks, u32(offsetof(A64JitState, user_callbacks)));
+    }
+    void EmitLoadUserConfig(Xbyak::Reg64 reg) {
+        code.mov(reg, code.qword[code.ABI_JIT_PTR + offsetof(A64JitState, user_config)]);
+    }
+    void EmitLoadExclusiveAddressPointer(Xbyak::Reg64 reg) {
+        code.mov(reg, code.qword[code.ABI_JIT_PTR + offsetof(A64JitState, exclusive_address_ptr)]);
+    }
+    void EmitLoadExclusiveValuePointer(Xbyak::Reg64 reg) {
+        code.mov(reg, code.qword[code.ABI_JIT_PTR + offsetof(A64JitState, exclusive_value_ptr)]);
+    }
+    static std::optional<u32> OwnExclusiveAddressOffset() {
+        return u32(offsetof(A64JitState, exclusive_address_ptr));
+    }
+    u64 FastDispatchTableBase() const {
+        return reinterpret_cast<u64>(fast_dispatch_table.data());
+    }
+    size_t FastDispatchTableEntries() const {
+        return fast_dispatch_table.size();
+    }
+    CodePtr UnlinkedTarget(const IR::LocationDescriptor& target_desc) override;
+
 //protected:
     struct FastDispatchEntry {
         u64 location_descriptor = 0xFFFF'FFFF'FFFF'FFFFull;
         const void* code_ptr = nullptr;
     };
     static_assert(sizeof(FastDispatchEntry) == 0x10);
+    /// Shared code: another core's fast-dispatch table, cleared and unpatched with the others.
+    void RegisterDispatchTable(FastDispatchEntry* table);
+    void UnregisterDispatchTable(FastDispatchEntry* table);
     static constexpr size_t default_fast_dispatch_table_bits = 20;
     /// Entries per set when conf.fast_dispatch_set_associative (one 64-byte cache line).
     static constexpr size_t fast_dispatch_ways = 4;
@@ -170,7 +201,9 @@ public:
     boost::container::stable_vector<Xbyak::Label> shared_labels;
     const void* terminal_handler_pop_rsb_hint = nullptr;
     const void* terminal_handler_fast_dispatch_hint = nullptr;
-    FastDispatchEntry& (*fast_dispatch_table_lookup)(u64) = nullptr;
+    FastDispatchEntry& (*fast_dispatch_table_lookup)(u64, FastDispatchEntry*) = nullptr;
+    /// Every core's fast-dispatch table (the first is fast_dispatch_table).
+    std::vector<FastDispatchEntry*> dispatch_tables;
     A64::Jit* jit_interface = nullptr;
     void (*memory_read_128)() = nullptr;
     void (*memory_write_128)() = nullptr;

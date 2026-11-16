@@ -63,6 +63,22 @@ public:
         return !swapchain || IsSubOptimal() || NeedsPresentModeUpdate();
     }
 
+    /// The swapchain's present mode, for logs.
+    const char* PresentModeName() const {
+        switch (present_mode) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:
+            return "immediate";
+        case VK_PRESENT_MODE_MAILBOX_KHR:
+            return "mailbox";
+        case VK_PRESENT_MODE_FIFO_KHR:
+            return "fifo";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+            return "fifo relaxed";
+        default:
+            return "other";
+        }
+    }
+
     bool IsCreated() const {
         return static_cast<bool>(swapchain);
     }

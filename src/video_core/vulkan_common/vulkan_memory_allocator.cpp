@@ -989,13 +989,21 @@ void CheckMemoryPeak(const Device& device) {
         usage += budgets[heap].usage;
         vma_bytes += budgets[heap].statistics.blockBytes;
     }
-    if (usage < last_dump + (256ULL << 20)) {
+    // Touching <path>.now asks for one dump of the current map (<path>.now-<n>.json), to compare
+    // the load peak with the settled state later in the same session.
+    static u32 now_dumps{};
+    const std::string now_trigger = fmt::format("{}.now", path);
+    const bool now = std::remove(now_trigger.c_str()) == 0;
+    if (!now && usage < last_dump + (256ULL << 20)) {
         return;
     }
-    last_dump = usage;
+    if (!now) {
+        last_dump = usage;
+    }
     char* json{};
     vmaBuildStatsString(allocator, &json, VK_TRUE);
-    const std::string file_path = fmt::format("{}.peak.json", path);
+    const std::string file_path =
+        now ? fmt::format("{}.now-{}.json", path, ++now_dumps) : fmt::format("{}.peak.json", path);
     if (std::FILE* file = std::fopen(file_path.c_str(), "w")) {
         std::fputs(json, file);
         std::fclose(file);

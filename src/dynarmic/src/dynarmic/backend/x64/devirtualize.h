@@ -86,5 +86,13 @@ ArgCallback Devirtualize(mcl::class_type<decltype(mfp)>* this_) {
 #endif
 }
 
+/// Devirtualize, but the call reads its `this` from the JIT state at `state_offset` (where each
+/// core keeps its own object of the same class as `this_`), so the code serves every core.
+template<auto mfp>
+ArgCallback DevirtualizeState(mcl::class_type<decltype(mfp)>* this_, u32 state_offset) {
+    const ArgCallback callback = Devirtualize<mfp>(this_);
+    return callback.FromState(state_offset, callback.Argument() - reinterpret_cast<u64>(this_));
+}
+
 }  // namespace Backend::X64
 }  // namespace Dynarmic

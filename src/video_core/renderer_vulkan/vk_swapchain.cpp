@@ -124,6 +124,17 @@ static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
         }
         if (Settings::values.use_speed_limit.GetValue() &&
             Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo) {
+            // EDEN_NX2_NOFG_PRESENT=mailbox (test): without frame generation, present FIFO vsync
+            // as mailbox. The emulator paces the game itself; FIFO only queues finished frames,
+            // which a 30 fps cap in gamescope turns into input lag.
+            static const bool nofg_mailbox = [] {
+                const char* value = std::getenv("EDEN_NX2_NOFG_PRESENT");
+                return value != nullptr && std::string_view{value} == "mailbox";
+            }();
+            if (nofg_mailbox && has_mailbox &&
+                (mode == Settings::VSyncMode::Fifo || mode == Settings::VSyncMode::FifoRelaxed)) {
+                return Settings::VSyncMode::Mailbox;
+            }
             return mode;
         }
         switch (mode) {

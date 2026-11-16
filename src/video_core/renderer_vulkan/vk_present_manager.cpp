@@ -261,6 +261,7 @@ Frame* PresentManager::GetRenderFrame() {
     frame->present_done.Reset();
     frame->color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     frame->present_spacing = {};
+    frame->composed = {};
 #ifdef EGLANTINE_STREAMLINE
     frame->frame_gen = false;
 #endif
@@ -429,6 +430,61 @@ void PresentManager::WaitPresent() {
     std::scoped_lock swapchain_lock{swapchain_mutex};
 }
 
+/// EDEN_NX2_PRESENT_LATENCY_LOG=1: every 10 s, how long game frames waited between the renderer
+/// handing them over and the swapchain present (present queue, pacing sleep, image acquire).
+bool PresentManager::NoFgLatestOnly() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_NOFG_LATEST");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+bool PresentManager::PresentLatencyLog() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_PRESENT_LATENCY_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void PresentManager::LogPresentLatency(const Frame* frame,
+                                       std::chrono::steady_clock::time_point ready,
+                                       std::chrono::steady_clock::time_point start) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto ms = [](auto duration) {
+        return std::chrono::duration<double, std::milli>(duration).count();
+    };
+    auto& log = latency_log;
+    if (log.since == std::chrono::steady_clock::time_point{}) {
+        log.since = now;
+    }
+    const double acquire = ms(last_acquire_wait);
+    log.acquire_sum += acquire;
+    log.acquire_max = (std::max)(log.acquire_max, acquire);
+    ++log.presents;
+    if (frame->composed != std::chrono::steady_clock::time_point{}) {
+        const double queued = ms(ready - frame->composed);
+        const double total = ms(now - frame->composed);
+        log.queued_sum += queued;
+        log.total_sum += total;
+        log.total_max = (std::max)(log.total_max, total);
+        log.paced_sum += ms(start - ready);
+        ++log.game_frames;
+    }
+    if (now - log.since >= std::chrono::seconds(10)) {
+        const double n = log.game_frames ? static_cast<double>(log.game_frames) : 1.0;
+        LOG_INFO(Render_Vulkan,
+                 "Present latency (10 s): {} game frames, {} presents, {} older frames dropped, {}; game frame handed over "
+                 "-> presented avg {:.1f} ms (max {:.1f}): in the present queue {:.1f}, pacing "
+                 "{:.1f}; image acquire avg {:.1f} ms (max {:.1f})",
+                 log.game_frames, log.presents, log.dropped, swapchain.PresentModeName(), log.total_sum / n,
+                 log.total_max, log.queued_sum / n, log.paced_sum / n,
+                 log.presents ? log.acquire_sum / log.presents : 0.0, log.acquire_max);
+        log = {.since = now};
+    }
+}
+
 void PresentManager::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadName("VulkanPresent");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
@@ -441,6 +497,26 @@ void PresentManager::PresentThread(std::stop_token token) {
             // Take the frame and notify anyone waiting
             Frame* frame = present_queue.front();
             present_queue.pop_front();
+            // Without frame generation only the newest finished game frame is worth showing. A
+            // 30 fps cap in Gaming Mode makes gamescope hold each image acquire for a frame; the
+            // game kept rendering and up to three frames waited here (~130 ms from finished to
+            // presented, with what runs ahead about a second of felt input lag). Older frames
+            // are dropped instead (EDEN_NX2_NOFG_LATEST=0 keeps them all). Frame generation
+            // queues and paces its frames itself: untouched.
+            while (NoFgLatestOnly() && !Settings::values.frame_gen.GetValue() &&
+                   frame->composed != std::chrono::steady_clock::time_point{} &&
+                   !present_queue.empty() &&
+                   present_queue.front()->composed != std::chrono::steady_clock::time_point{}) {
+                DiscardFrame(frame);
+                {
+                    std::scoped_lock fl{free_mutex};
+                    free_queue.push_back(frame);
+                    free_cv.notify_one();
+                }
+                ++latency_log.dropped;
+                frame = present_queue.front();
+                present_queue.pop_front();
+            }
             frame_cv.notify_one();
 
             // By exchanging the lock ownership we take the swapchain lock
@@ -455,7 +531,11 @@ void PresentManager::PresentThread(std::stop_token token) {
             // speed (#1772).
             const auto start = (std::max)(next_present, ready);
             SleepUntil(start);
+            last_acquire_wait = {};
             CopyToSwapchain(frame);
+            if (PresentLatencyLog()) {
+                LogPresentLatency(frame, ready, start);
+            }
             {
                 static std::chrono::steady_clock::time_point last{};
                 const auto now = std::chrono::steady_clock::now();
@@ -639,11 +719,13 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     {
         // On the present thread: the swapchain image acquire (and the pacing wait in it).
         VideoCommon::Nx2Profile::Scope acquire_scope{VideoCommon::Nx2Profile::Zone::PresentWait};
+        const auto acquiring = std::chrono::steady_clock::now();
         while (swapchain.AcquireNextImage(!use_present_thread)) {
             if (!RecreateSwapchain(frame)) {
                 return;
             }
         }
+        last_acquire_wait = std::chrono::steady_clock::now() - acquiring;
     }
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};

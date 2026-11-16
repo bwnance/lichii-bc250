@@ -53,6 +53,17 @@ public:
     ArgCallback(Function fn, u64 arg)
             : fn(reinterpret_cast<void (*)()>(fn)), arg(arg) {}
 
+    /// The same call with its first argument read from the JIT state at `state_offset` (plus
+    /// `adjust`) instead of an immediate: code that serves several cores.
+    u64 Argument() const { return arg; }
+
+    ArgCallback FromState(u32 state_offset, u64 adjust) const {
+        ArgCallback copy = *this;
+        copy.arg = adjust;
+        copy.state_offset = state_offset;
+        return copy;
+    }
+
     using Callback::EmitCall;
 
     void EmitCall(BlockOfCode& code, std::function<void(RegList)> fn) const override;
@@ -61,6 +72,7 @@ public:
 private:
     void (*fn)();
     u64 arg;
+    u32 state_offset = ~u32{0};  ///< ~0: `arg` is the argument itself
 };
 
 }  // namespace Dynarmic::Backend::X64

@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v15
+# lichii-bc250 v16
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -21,11 +21,11 @@ All emulator credit belongs to the Lichii, Eglantine, Eden and yuzu authors; thi
 carries the BC-250-specific changes on top. GPLv3, like upstream. The repository was called
 `oot-bc250` until 2026-11-11; GitHub redirects the old URL.
 
-**What's new:** see [CHANGELOG.md](CHANGELOG.md). v10 fixes missing or white/yellow foliage on
-systems whose GPU driver offers mesh shaders it then refuses to build (reported on CachyOS), and
-lets any gamepad play when the game isn't started from Steam. v9 cut about 500 MB of RAM. v8 made open areas like Hyrule
-Field smoother (about 40 % fewer dropped frames) with 14 upstream Lichii speed-ups, without the
-castle-entry regression of the newest upstream builds. (Upstream's installer runs it in a small container on Bazzite; this fork runs it natively.)
+**What's new:** see [CHANGELOG.md](CHANGELOG.md). v16 shares the translated game code between
+the emulated CPU cores (about 1 GB less memory), keeps textures through fast camera turns
+(Kokiri Forest 53.6 -> 58.1 fps on the test route), cuts the Castle Town entry freeze from
+4-6 s to 2-3 s, and fixes the input lag with frame generation off and a 30 fps cap in Gaming
+Mode. v15 fixed a memory leak that grew all session. (Upstream's installer runs it in a small container on Bazzite; this fork runs it natively.)
 
 ## How it plays
 

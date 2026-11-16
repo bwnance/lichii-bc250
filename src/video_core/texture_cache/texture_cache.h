@@ -245,8 +245,17 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             const char* value = std::getenv("EDEN_NX2_TC_KEEP_GPU_FRAMES");
             return value != nullptr ? std::strtoull(value, nullptr, 10) : 300ULL;
         }();
+        // Not images newer ones partly overwrote (BadOverlap): their bytes belong to the newer
+        // images, nothing comes back for them. Kept as well, Ocarina's render targets at shifting
+        // offsets piled up for 300 frames on every area load (castle entry: ~1 GB of dedicated
+        // render-target images at the peak against ~0.25 GB a minute later).
+        static const bool keep_bad_overlaps = [] {
+            const char* value = std::getenv("EDEN_NX2_TC_KEEP_BAD_OVERLAPS");
+            return value != nullptr && value[0] == '1';
+        }();
         if (True(image.flags & ImageFlagBits::GpuModified) && !out_of_memory &&
             keep_gpu_frames != 0 &&
+            (keep_bad_overlaps || False(image.flags & ImageFlagBits::BadOverlap)) &&
             frame_tick - image.last_use_frame < keep_gpu_frames) {
             ++gc_kept_gpu_images;
             return false;
@@ -481,8 +490,11 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
 
 template <class P>
 void TextureCache<P>::LogThresholds() const {
-    LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
-             expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
+    LOG_INFO(HW_GPU,
+             "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB, "
+             "retention {} MiB",
+             expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20,
+             retention_limit >> 20);
 }
 
 namespace rt_track_detail {
@@ -762,9 +774,27 @@ void TextureCache<P>::TickFrame() {
                             const u64 raised = (std::min)(
                                 (std::min)(critical_memory + other_memory, heap_critical),
                                 host_critical);
+                            const u64 old_critical = critical_memory;
                             critical_memory = (std::max)(critical_memory, raised);
                             expected_memory =
                                 critical_memory - (std::min)(gap, critical_memory / 2);
+                            // The retention limit (below it, images used in the last
+                            // EDEN_NX2_TC_MIN_AGE frames are kept) moves with the thresholds. Left
+                            // at the device budget, Ocarina's ~1.9 GB that isn't images kept the
+                            // BC-250 above it all session: the collector's 10-50 frame age took
+                            // textures the camera had just turned away from, and 150-380 images a
+                            // second came back within ~2 s on a galloping camera turn (as many
+                            // ASTC decodes and uploads; Hyrule Field 46-52 fps while turning).
+                            // Still bounded by the host's commit room.
+                            static const bool raise_retention = [] {
+                                const char* value = std::getenv("EDEN_NX2_TC_RAISE_RETENTION");
+                                return value == nullptr || value[0] != '0';
+                            }();
+                            if (raise_retention && retention_limit != 0) {
+                                retention_limit = (std::min)(
+                                    retention_limit + (critical_memory - old_critical),
+                                    host_critical);
+                            }
                         }
                     }
                     // Log the first values and real changes (the budget moves by a few MiB all
@@ -2535,6 +2565,28 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
             return;
         }
         ++tc_stale_gpu_written;
+    }
+
+    // A new large depth image (never GPU-written yet) is a render target the game clears before
+    // it draws: what guest memory holds there is not a depth buffer to keep. Ocarina's 288 MiB
+    // 12288x12288 shadow map is unmapped when an area is left and created again on entry; reading
+    // its guest bytes (76k page faults with RAM full) took 2.3 s of the 5.7 s Castle Town entry
+    // frame. EDEN_NX2_TC_SKIP_DEPTH_UPLOAD_MIB=<n> sets the size (default 64), 0 uploads all.
+    static const u64 skip_depth_bytes = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_SKIP_DEPTH_UPLOAD_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 64ULL) << 20;
+    }();
+    if (skip_depth_bytes != 0 && image.guest_size_bytes >= skip_depth_bytes &&
+        False(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::Sparse |
+                             ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles)) &&
+        image.dirty_layers.empty() &&
+        VideoCore::Surface::GetFormatType(image.info.format) !=
+            VideoCore::Surface::SurfaceType::ColorTexture) {
+        ++tc_depth_upload_skips;
+        LOG_INFO(HW_GPU, "Skipped the guest-memory upload of a new {}x{} depth image ({} MiB)",
+                 image.info.size.width, image.info.size.height, image.guest_size_bytes >> 20);
+        runtime.TransitionImageLayout(image);
+        return;
     }
 
     if (True(image.flags & ImageFlagBits::SparseLayers)) {

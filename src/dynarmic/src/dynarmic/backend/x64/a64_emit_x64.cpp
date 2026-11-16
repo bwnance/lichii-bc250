@@ -63,6 +63,7 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
         bits = std::clamp<size_t>(bits, 8, 24);
         fast_dispatch_set_size = conf.fast_dispatch_set_associative ? fast_dispatch_ways : 1;
         fast_dispatch_table.resize(size_t(1) << bits);
+        dispatch_tables.push_back(fast_dispatch_table.data());
         fast_dispatch_table_mask = u32(((size_t(1) << bits) - 1) * sizeof(FastDispatchEntry)) & ~u32(fast_dispatch_set_size * sizeof(FastDispatchEntry) - 1);
     }
     code.elide_redundant_zext = conf.elide_redundant_zext;
@@ -263,12 +264,13 @@ finish_this_inst:
 
 void A64EmitX64::ClearCache() {
     EmitX64::ClearCache();
-    exit_stubs.clear();
-    pending_exit_stubs.clear();
+    decltype(exit_stubs){}.swap(exit_stubs);
+    decltype(pending_exit_stubs){}.swap(pending_exit_stubs);
     block_ranges.ClearCache();
     ClearFastDispatchTable();
-    fastmem_patch_info.clear();
-    fastmem_blocks.clear();
+    const FastmemLockGuard guard{fastmem_lock};
+    decltype(fastmem_patch_info){}.swap(fastmem_patch_info);
+    decltype(fastmem_blocks){}.swap(fastmem_blocks);
 }
 
 void A64EmitX64::InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges) {
@@ -277,8 +279,24 @@ void A64EmitX64::InvalidateCacheRanges(const boost::icl::interval_set<u64>& rang
 
 void A64EmitX64::ClearFastDispatchTable() {
     if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
-        std::fill(fast_dispatch_table.begin(), fast_dispatch_table.end(), FastDispatchEntry{});
+        for (FastDispatchEntry* const table : dispatch_tables) {
+            std::fill_n(table, fast_dispatch_table.size(), FastDispatchEntry{});
+        }
     }
+}
+
+void A64EmitX64::RegisterDispatchTable(FastDispatchEntry* table) {
+    std::fill_n(table, fast_dispatch_table.size(), FastDispatchEntry{});
+    dispatch_tables.push_back(table);
+}
+
+void A64EmitX64::UnregisterDispatchTable(FastDispatchEntry* table) {
+    std::erase(dispatch_tables, table);
+}
+
+CodePtr A64EmitX64::UnlinkedTarget(const IR::LocationDescriptor& target_desc) {
+    const auto it = exit_stubs.find(target_desc.Value());
+    return it != exit_stubs.end() ? it->second : nullptr;
 }
 
 void A64EmitX64::GenTerminalHandlers() {
@@ -332,7 +350,7 @@ void A64EmitX64::GenTerminalHandlers() {
         check_halt();
         calculate_location_descriptor();
         code.L(rsb_cache_miss);
-        code.mov(r8, u64(fast_dispatch_table.data()));
+        code.mov(r8, qword[code.ABI_JIT_PTR + offsetof(A64JitState, fast_dispatch_table)]);
         //code.mov(r12, qword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)]);
         code.mov(r12, rbx);
         if (code.HasHostFeature(HostFeature::SSE42)) {
@@ -370,8 +388,8 @@ void A64EmitX64::GenTerminalHandlers() {
         PerfMapRegister(terminal_handler_fast_dispatch_hint, code.getCurr(), "a64_terminal_handler_fast_dispatch_hint");
 
         code.align();
-        fast_dispatch_table_lookup = code.getCurr<FastDispatchEntry& (*)(u64)>();
-        code.mov(code.ABI_PARAM2, u64(fast_dispatch_table.data()));
+        // (u64 location, FastDispatchEntry* table): each core has its own table.
+        fast_dispatch_table_lookup = code.getCurr<FastDispatchEntry& (*)(u64, FastDispatchEntry*)>();
         if (code.HasHostFeature(HostFeature::SSE42)) {
             code.crc32(code.ABI_PARAM1, code.ABI_PARAM2);
         }
@@ -689,7 +707,7 @@ void A64EmitX64::EmitA64CallSupervisor(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(args[0].IsImmediate());
     const u32 imm = args[0].GetImmediateU32();
-    Devirtualize<&A64::UserCallbacks::CallSVC>(conf.callbacks).EmitCall(code, [&](RegList param) {
+    UserCallback<&A64::UserCallbacks::CallSVC>().EmitCall(code, [&](RegList param) {
         code.mov(param[0], imm);
     });
     // The kernel would have to execute ERET to get here, which would clear exclusive state.
@@ -702,7 +720,7 @@ void A64EmitX64::EmitA64ExceptionRaised(A64EmitContext& ctx, IR::Inst* inst) {
     ASSERT(args[0].IsImmediate() && args[1].IsImmediate());
     const u64 pc = args[0].GetImmediateU64();
     const u64 exception = args[1].GetImmediateU64();
-    Devirtualize<&A64::UserCallbacks::ExceptionRaised>(conf.callbacks).EmitCall(code, [&](RegList param) {
+    UserCallback<&A64::UserCallbacks::ExceptionRaised>().EmitCall(code, [&](RegList param) {
         code.mov(param[0], pc);
         code.mov(param[1], exception);
     });
@@ -711,13 +729,13 @@ void A64EmitX64::EmitA64ExceptionRaised(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64DataCacheOperationRaised(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[1], args[2]);
-    Devirtualize<&A64::UserCallbacks::DataCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::DataCacheOperationRaised>().EmitCall(code);
 }
 
 void A64EmitX64::EmitA64InstructionCacheOperationRaised(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[0], args[1]);
-    Devirtualize<&A64::UserCallbacks::InstructionCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::InstructionCacheOperationRaised>().EmitCall(code);
 }
 
 void A64EmitX64::EmitA64DataSynchronizationBarrier(A64EmitContext&, IR::Inst*) {
@@ -735,7 +753,7 @@ void A64EmitX64::EmitA64InstructionSynchronizationBarrier(A64EmitContext& ctx, I
     }
 
     ctx.reg_alloc.HostCall(code, nullptr);
-    Devirtualize<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>().EmitCall(code);
 }
 
 void A64EmitX64::EmitA64GetCNTFRQ(A64EmitContext& ctx, IR::Inst* inst) {
@@ -749,7 +767,7 @@ void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
     if (!conf.wall_clock_cntpct) {
         code.UpdateTicks();
     }
-    Devirtualize<&A64::UserCallbacks::GetCNTPCT>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::GetCNTPCT>().EmitCall(code);
 }
 
 void A64EmitX64::EmitA64GetCTR(A64EmitContext& ctx, IR::Inst* inst) {
@@ -767,7 +785,7 @@ void A64EmitX64::EmitA64GetDCZID(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidr_el0) {
-        code.mov(result, u64(conf.tpidr_el0));
+        code.mov(result, qword[code.ABI_JIT_PTR + offsetof(A64JitState, tpidr_el0_ptr)]);
         code.mov(result, qword[result]);
     } else {
         code.xor_(result.cvt32(), result.cvt32());
@@ -778,7 +796,7 @@ void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64GetTPIDRRO(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidrro_el0) {
-        code.mov(result, u64(conf.tpidrro_el0));
+        code.mov(result, qword[code.ABI_JIT_PTR + offsetof(A64JitState, tpidrro_el0_ptr)]);
         code.mov(result, qword[result]);
     } else {
         code.xor_(result.cvt32(), result.cvt32());
@@ -791,7 +809,7 @@ void A64EmitX64::EmitA64SetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 value = ctx.reg_alloc.UseGpr(code, args[0]);
     const Xbyak::Reg64 addr = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidr_el0) {
-        code.mov(addr, u64(conf.tpidr_el0));
+        code.mov(addr, qword[code.ABI_JIT_PTR + offsetof(A64JitState, tpidr_el0_ptr)]);
         code.mov(qword[addr], value);
     }
 }
@@ -1041,6 +1059,9 @@ void A64EmitX64::EmitUnlinkedExit(const IR::LocationDescriptor& target) {
 // while unlinked. Every site gets its stub at first emission, so Unpatch always finds one.
 #define COMPACT_PATCH(JCC, SIZE)                                                                    \
     if (conf.compact_block_exits) {                                                                 \
+        if (atomic_patching) {                                                                      \
+            code.nop(PatchPad(patch_location, SIZE == 5 ? 1 : 2));                                  \
+        }                                                                                           \
         if (emitting_block) {                                                                       \
             EnsureExitStub(target_desc);                                                            \
         }                                                                                           \
@@ -1052,7 +1073,7 @@ void A64EmitX64::EmitUnlinkedExit(const IR::LocationDescriptor& target) {
             ASSERT(emitting_block);                                                                 \
             code.JCC(*PendingExitStub(target_desc), code.T_NEAR);                                   \
         }                                                                                           \
-        code.EnsurePatchLocationSize(patch_location, SIZE);                                         \
+        code.EnsurePatchLocationSize(patch_location, SIZE + (atomic_patching ? 3 : 0));             \
         return;                                                                                     \
     }
 
@@ -1110,10 +1131,12 @@ void A64EmitX64::Unpatch(const IR::LocationDescriptor& location) {
     EmitX64::Unpatch(location);
     if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
         code.DisableWriting();
-        FastDispatchEntry* const set = &(*fast_dispatch_table_lookup)(location.Value());
-        for (size_t way = 0; way < fast_dispatch_set_size; ++way) {
-            if (set[way].location_descriptor == location.Value()) {
-                set[way] = {};
+        for (FastDispatchEntry* const table : dispatch_tables) {
+            FastDispatchEntry* const set = &(*fast_dispatch_table_lookup)(location.Value(), table);
+            for (size_t way = 0; way < fast_dispatch_set_size; ++way) {
+                if (set[way].location_descriptor == location.Value()) {
+                    set[way] = {};
+                }
             }
         }
         code.EnableWriting();

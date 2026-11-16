@@ -59,6 +59,9 @@ struct Frame {
     /// Time the present thread leaves before presenting the next frame. Frame generation sets it
     /// on generated frames, so they share the screen time evenly with the real ones.
     std::chrono::nanoseconds present_spacing{};
+    /// When the renderer handed this game frame to Present (default for generated frames), for
+    /// EDEN_NX2_PRESENT_LATENCY_LOG.
+    std::chrono::steady_clock::time_point composed{};
 #ifdef EGLANTINE_STREAMLINE
     // DLSS Frame Generation: the guest frame presented and where the guest image is in the frame.
     bool frame_gen{};
@@ -108,6 +111,25 @@ public:
 
     [[nodiscard]] std::size_t SwapchainImageCount() const { return swapchain_image_count; }
     [[nodiscard]] VkFormat SwapchainImageFormat() const { return swapchain_image_format; }
+
+private:
+    static bool PresentLatencyLog();
+    static bool NoFgLatestOnly();
+    void LogPresentLatency(const Frame* frame, std::chrono::steady_clock::time_point ready,
+                           std::chrono::steady_clock::time_point start);
+    struct {
+        std::chrono::steady_clock::time_point since{};
+        u64 presents{};
+        u64 game_frames{};
+        u64 dropped{};
+        double queued_sum{};
+        double paced_sum{};
+        double total_sum{};
+        double total_max{};
+        double acquire_sum{};
+        double acquire_max{};
+    } latency_log{};
+    std::chrono::steady_clock::duration last_acquire_wait{};
 
 private:
     enum class TransferMode { Unsupported, Copy, Blit };

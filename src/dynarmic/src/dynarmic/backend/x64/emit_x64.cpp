@@ -407,6 +407,35 @@ void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_co
     if (it == patch_information.end()) {
         return;
     }
+    if (atomic_patching) {
+        // Every site is a jmp/jcc rel32 with the rel32 4-byte aligned: one atomic store each.
+        const CodePtr dest = target_code_ptr ? target_code_ptr : UnlinkedTarget(target_desc);
+        ASSERT(dest != nullptr);
+        const auto patch_atomic = [&](u32 entry) {
+            const PatchKind kind = PatchKind(entry & 3);
+            ASSERT(kind != PatchKind::MovRcx);
+            const size_t opcode_len = kind == PatchKind::Jmp ? 1 : 2;
+            u8* const site = const_cast<u8*>(static_cast<const u8*>(code.getCode())) + (entry >> 2);
+            u8* const opcode = site + PatchPad(site, opcode_len);
+            ASSERT_MSG(kind == PatchKind::Jmp ? opcode[0] == 0xE9 : opcode[0] == 0x0F && (opcode[1] & 0xF0) == 0x80,
+                       "Shared JIT: unexpected link site bytes {:02x} {:02x}", opcode[0], opcode[1]);
+            u8* const rel32 = opcode + opcode_len;
+            const s64 disp = reinterpret_cast<const u8*>(dest) - (rel32 + 4);
+            ASSERT(disp >= INT32_MIN && disp <= INT32_MAX);
+            __atomic_store_n(reinterpret_cast<u32*>(rel32), static_cast<u32>(static_cast<s32>(disp)), __ATOMIC_RELEASE);
+        };
+        for (const u32 entry : it->second.first) {
+            if (entry != 0) {
+                patch_atomic(entry);
+            }
+        }
+        if (it->second.rest) {
+            for (const u32 entry : *it->second.rest) {
+                patch_atomic(entry);
+            }
+        }
+        return;
+    }
     const CodePtr save_code_ptr = code.getCurr();
     const auto patch = [&](u32 entry) {
         code.SetCodePtr(static_cast<const u8*>(code.getCode()) + (entry >> 2));
@@ -443,8 +472,10 @@ void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {
 }
 
 void EmitX64::ClearCache() {
-    block_descriptors.clear();
-    patch_information.clear();
+    // Swap with empty tables instead of clear(): clear() keeps the capacity, so after a full
+    // flush the tables would keep the memory of everything compiled before it.
+    decltype(block_descriptors){}.swap(block_descriptors);
+    decltype(patch_information){}.swap(patch_information);
 
     PerfMapClear(code.GetCodeBegin(), code.getCode() + code.GetTotalCodeSize());
 }

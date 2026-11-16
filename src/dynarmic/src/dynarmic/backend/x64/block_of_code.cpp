@@ -13,6 +13,7 @@
 #    include <windows.h>
 #else
 #    include <sys/mman.h>
+#    include <unistd.h>
 #endif
 
 #ifdef __APPLE__
@@ -221,6 +222,25 @@ void BlockOfCode::DisableWriting() {
 void BlockOfCode::ClearCache() {
     ASSERT(prelude_complete);
     ASSERT(!in_far_code);
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // A full flush gives the used code pages back (they refault as zeros when code is emitted
+    // there again): without this a flush only rewinds the pointers and the memory stays resident
+    // or in swap for the rest of the session.
+    static const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const auto release = [](const void* begin, const void* end) {
+        const size_t first = (reinterpret_cast<size_t>(begin) + page_size - 1) & ~(page_size - 1);
+        const size_t last = reinterpret_cast<size_t>(end) & ~(page_size - 1);
+        if (last > first) {
+            madvise(reinterpret_cast<void*>(first), last - first, MADV_DONTNEED);
+        }
+    };
+    if (getCurr<const u8*>() > code_begin) {
+        release(code_begin, getCurr<const u8*>());
+    }
+    if (far_code_begin && far_code_ptr > far_code_begin) {
+        release(far_code_begin, far_code_ptr);
+    }
+#endif
     SetCodePtr(code_begin);
     far_code_ptr = far_code_begin;
 }

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <algorithm>
 #include <cstdlib>
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
@@ -386,7 +387,15 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 #if defined(ARCHITECTURE_arm64) || defined(__sun__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__OpenBSD__)
     config.code_cache_size = std::uint32_t(128_MiB);
 #else
-    config.code_cache_size = std::uint32_t(512_MiB);
+    // EDEN_NX2_JIT_CACHE_MIB: code cache per emulated core (default 512). Each core compiles its
+    // own copy of the game's code and never fills 512 MiB, so nothing compiled is ever freed; a
+    // smaller cache makes a full core flush its code and tables and give the memory back.
+    static const std::uint32_t jit_cache_mib = [] {
+        const char* value = std::getenv("EDEN_NX2_JIT_CACHE_MIB");
+        const unsigned long mib = value != nullptr ? std::strtoul(value, nullptr, 10) : 512UL;
+        return static_cast<std::uint32_t>(std::clamp(mib, 64UL, 512UL));
+    }();
+    config.code_cache_size = jit_cache_mib << 20;
 #endif
 
     // Allow memory fault handling to work

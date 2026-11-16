@@ -9,6 +9,7 @@
 #pragma once
 
 #include <bit>
+#include <optional>
 #include <utility>
 #include "dynarmic/backend/x64/xbyak.h"
 
@@ -387,7 +388,8 @@ void EmitExclusiveUnlock(BlockOfCode& code, const UserConfig& conf, Xbyak::Reg64
 }
 
 template<typename UserConfig>
-void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak::Reg64 vaddr, Xbyak::Reg64 pointer, Xbyak::Reg64 tmp) {
+void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak::Reg64 vaddr, Xbyak::Reg64 pointer, Xbyak::Reg64 tmp,
+                               std::optional<u32> own_address_offset = std::nullopt) {
     if (conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
         return;
     }
@@ -395,11 +397,16 @@ void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak:
     code.mov(tmp, 0xDEAD'DEAD'DEAD'DEAD);
     const size_t processor_count = GetExclusiveMonitorProcessorCount(conf.global_monitor);
     for (size_t processor_index = 0; processor_index < processor_count; processor_index++) {
-        if (processor_index == conf.processor_id) {
+        // Code that serves every core skips its own slot at run time (the JIT state holds it).
+        if (!own_address_offset && processor_index == conf.processor_id) {
             continue;
         }
         Xbyak::Label ok;
         code.mov(pointer, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, processor_index)));
+        if (own_address_offset) {
+            code.cmp(pointer, qword[code.ABI_JIT_PTR + *own_address_offset]);
+            code.je(ok, code.T_NEAR);
+        }
         code.cmp(qword[pointer], vaddr);
         code.jne(ok, code.T_NEAR);
         code.mov(qword[pointer], tmp);

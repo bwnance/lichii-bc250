@@ -9,6 +9,8 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <thread>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -97,6 +99,37 @@ public:
 
     /// Invalidates a selection of basic blocks.
     void InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& locations);
+
+    // Shared code (docs/bc250-shared-jit.md): several cores run this code at once.
+    /// Link sites are padded so their rel32 is 4-byte aligned, and Patch() rewrites only that
+    /// word with one atomic store (another core may be executing the site).
+    bool atomic_patching = false;
+    /// Set with shared code: a fastmem fault that wants its block recompiled only asks for the
+    /// block to be invalidated (at the next point every core is stopped) instead of unpatching
+    /// code other cores may be running.
+    std::function<void(u64 pc)> request_block_invalidation;
+    /// Bytes of padding before a link site whose opcode is `opcode_len` long.
+    static size_t PatchPad(const void* site, size_t opcode_len) {
+        const auto rel32 = reinterpret_cast<uintptr_t>(site) + opcode_len;
+        return (4 - (rel32 & 3)) & 3;
+    }
+    /// Where an unlinked site of `target_desc` jumps (atomic patching).
+    virtual CodePtr UnlinkedTarget(const IR::LocationDescriptor& target_desc) { return nullptr; }
+
+    /// Guards the fastmem tables (patch info, blocks, do-not-fastmem markers): the fault handler
+    /// reads them on the faulting core while another core may be compiling. A spin lock, as the
+    /// handler runs in a signal handler; a thread only holds it in compile code, never while it
+    /// runs emitted code, so the handler never waits for its own thread.
+    mutable std::atomic_flag fastmem_lock = ATOMIC_FLAG_INIT;
+    struct FastmemLockGuard {
+        explicit FastmemLockGuard(std::atomic_flag& flag_) : flag(flag_) {
+            while (flag.test_and_set(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }
+        ~FastmemLockGuard() { flag.clear(std::memory_order_release); }
+        std::atomic_flag& flag;
+    };
 
 //protected:
     // Microinstruction emitters

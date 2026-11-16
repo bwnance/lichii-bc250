@@ -4,6 +4,29 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v16 — 2026-11-16: shared JIT, smoother camera turns, shorter area-entry freezes, no lag with frame gen off
+
+- **One copy of the translated game code for all six emulated CPU cores** (it was translated and
+  stored once per core: 73 % of it duplicates). The emulator's own memory is about 1 GB lower
+  (Castle Town route: 2.7 vs 3.7 GB; JIT code 174 vs 660 MB) and it stays lower in long sessions.
+  `EDEN_NX2_SHARED_JIT=0` goes back to one cache per core. Design notes: docs/bc250-shared-jit.md.
+- **Fast camera turns no longer rebuild textures.** Textures used in the last ~10 s were meant to
+  be kept while there is room, but on the BC-250 that rule never applied (it compared all of the
+  GPU memory, not only textures, with the limit), so a texture out of view for one second was
+  deleted and decoded again when the camera came back: 150-380 a second while turning. Test
+  routes: Kokiri Forest 53.6 -> 58.1 fps (turns 47-51 -> 58-60), Kakariko 58.2 -> 58.8, second
+  laps 59-60 everywhere.
+- **Shorter freezes when entering an area.** Ocarina's 288 MiB shadow map is re-created on every
+  area entry and the emulator first copied its old contents from game memory (2.3 s with RAM
+  full); a new depth buffer the game hasn't drawn yet is now just created. Dead render-target
+  copies are freed instead of kept for 10 s. Castle Town entry: 4.1-5.7 s -> 2.3-2.9 s.
+- **No input lag with frame generation off and a framerate limit.** With Gaming Mode's 30 fps
+  limit, frames waited in the emulator's present queue (~130 ms, felt as up to a second of lag).
+  Without frame generation only the newest finished frame is presented now (~23 ms).
+  Frame generation is unchanged. `EDEN_NX2_NOFG_LATEST=0` restores the old behaviour.
+- Diagnostics: `EDEN_NX2_PRESENT_LATENCY_LOG=1` (present-queue latency every 10 s), an on-demand
+  GPU memory map (`touch <EDEN_NX2_VMA_PEAK_DUMP>.now`), retention limit in the texture cache log.
+
 ### v15 — 2026-11-15: a 768 MB memory leak fixed, faster start-up, latest Lichii
 
 - **Fixed a memory leak that grew all session.** The emulator kept a record of every GPU compute

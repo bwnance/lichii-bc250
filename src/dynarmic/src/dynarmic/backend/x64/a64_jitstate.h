@@ -71,6 +71,18 @@ struct A64JitState {
     u64 host_stack_limit = 0;  // a call below this drops all frames
     u8 check_bit = 0;
 
+    // Per-core values the emitted code reads here instead of having them baked in as
+    // immediates, so one copy of the code can serve every core (docs/bc250-shared-jit.md).
+    // Set by Jit::Impl; Reset() keeps them.
+    u64 user_callbacks = 0;         ///< A64::UserCallbacks*
+    u64 user_config = 0;            ///< const A64::UserConfig*
+    u64 jit_impl = 0;               ///< Jit::Impl*
+    u64 tpidr_el0_ptr = 0;          ///< u64*
+    u64 tpidrro_el0_ptr = 0;        ///< const u64*
+    u64 exclusive_address_ptr = 0;  ///< this core's exclusive monitor address slot
+    u64 exclusive_value_ptr = 0;    ///< this core's exclusive monitor value slot
+    u64 fast_dispatch_table = 0;    ///< FastDispatchEntry*
+
     u32 GetPstate() const {
         return NZCV::FromX64(cpsr_nzcv);
     }
