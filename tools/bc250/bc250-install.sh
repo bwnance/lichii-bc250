@@ -256,6 +256,28 @@ else
         python3 "$APP_DIR/import_gui_controls.py" "$config" || true
     fi
 fi
+# Area loads: when the game starts reading an area's files, the emulator asks the kernel to
+# reclaim 1.5 GB of cold memory, so the area's textures don't wait for it (Castle Town entry
+# 2.2-3.8 s -> 1.0-2.2 s). Run natively it writes its own scope's memory.reclaim; when it can't,
+# it leaves the amount in $XDG_RUNTIME_DIR/lichii-bc250-reclaim and this helper writes it.
+# Ends when the game does.
+reclaim_helper() {
+    local request="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lichii-bc250-reclaim" amount pid cg
+    rm -f "$request"
+    sleep 20
+    while pgrep -x eden-cli >/dev/null; do
+        if [ -s "$request" ]; then
+            amount=$(head -c 16 "$request"); rm -f "$request"
+            pid=$(pgrep -x eden-cli | head -n 1)
+            cg=$(cut -d: -f3 "/proc/$pid/cgroup" 2>/dev/null); cg=${cg%/container}
+            [[ "$amount" =~ ^[0-9]+M$ ]] && [ -n "$cg" ] && echo "$amount" > "/sys/fs/cgroup$cg/memory.reclaim" 2>/dev/null || true
+        fi
+        sleep 0.25
+    done
+}
+if [ "${EDEN_NX2_PRE_RECLAIM_MIB:-1}" != 0 ]; then
+    reclaim_helper </dev/null >/dev/null 2>&1 &
+fi
 exec "$EDEN_EXEC" "$@"
 WRAP
 sed -i -e "s|__EDEN_EXEC__|$EDEN_EXEC|" -e "s|__GUI_EXEC__|${GUI_EXEC:-}|" "$APP_DIR/lichii-bc250"

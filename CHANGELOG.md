@@ -4,6 +4,26 @@ Versions follow `main`: the README title carries the current one, and it goes up
 every merge into `main`. Entries before v4 are dated only.
 
 
+### v17 — 2026-11-17: latest Lichii, and RAM freed before area loads
+
+- **Merged the latest Lichii** (86 upstream changes after v15's merge): GPU thread improvements
+  (command list copies batched, the GPU back no longer waits for a guest's turn), staging buffers
+  that recover when memory runs short, Ocarina mesh-draw and "No sharpening" fixes, a Mesh Shaders
+  setting, and upstream's own versions of two of this fork's fixes (#1908, merged from here, and
+  #1991, the texture retention limit from v16). Test routes: Kokiri 58.3, Hyrule Field on Epona
+  57.7, Castle Town 57.6 fps, the best so far on each.
+- **Shorter freezes when entering an area.** An area load reads the next area's files 2-5 s before
+  its textures arrive; with RAM full, those ~250 GPU memory allocations waited while the kernel
+  swapped (Castle Town entry: 2.2-3.8 s). When the game starts such a read burst and less than
+  2 GB is free, the emulator now asks the kernel to free cold memory up to 2 GB first (at most once
+  a minute): Castle Town entry 1.2-1.5 s. Inside the installer's container the emulator can't do
+  that itself, so the launcher runs a small helper next to it. Works for every game;
+  `EDEN_NX2_PRE_RECLAIM_MIB=0` turns it off, `EDEN_NX2_PRE_RECLAIM_TARGET_MIB` sets the target.
+  (An earlier version freed 1.5 GB at every burst and caused short audio stutters; it only frees
+  what is missing now.)
+- Tested and not kept: a larger image recycler, periodic heap trimming (`EDEN_NX2_HEAP_TRIM_S`
+  stays as an off-by-default test switch), collecting the texture cache in the middle of a frame.
+
 ### v16 — 2026-11-16: shared JIT, smoother camera turns, shorter area-entry freezes, no lag with frame gen off
 
 - **One copy of the translated game code for all six emulated CPU cores** (it was translated and

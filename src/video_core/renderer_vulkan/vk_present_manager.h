@@ -62,6 +62,8 @@ struct Frame {
     /// When the renderer handed this game frame to Present (default for generated frames), for
     /// EDEN_NX2_PRESENT_LATENCY_LOG.
     std::chrono::steady_clock::time_point composed{};
+    /// The presents that show this frame's game frame: 1 plus the frames generated for it.
+    u32 game_frame_presents{1};
 #ifdef EGLANTINE_STREAMLINE
     // DLSS Frame Generation: the guest frame presented and where the guest image is in the frame.
     bool frame_gen{};
@@ -108,6 +110,9 @@ public:
 
     /// How many additional frames can be queued without stalling the render thread
     [[nodiscard]] size_t MaxExtraFrames() const;
+
+    /// Frames GetRenderFrame can take now without waiting for the present thread.
+    [[nodiscard]] size_t FreeFrames();
 
     [[nodiscard]] std::size_t SwapchainImageCount() const { return swapchain_image_count; }
     [[nodiscard]] VkFormat SwapchainImageFormat() const { return swapchain_image_format; }

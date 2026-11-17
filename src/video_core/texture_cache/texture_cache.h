@@ -268,7 +268,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         return true;
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode, &CanEvict,
-                          out_of_memory](ImageId image_id) {
+                          &evict_bad_overlaps, out_of_memory](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
         }
@@ -302,9 +302,12 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             }
         }
         ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
+        trace_delete_flags = static_cast<u32>(image.flags);
+        trace_delete_downloaded = must_download;
         UnregisterImage(image_id);
         delete_reason = "collector";
-        trace_delete_reason = aggressive_mode      ? "gc-aggressive"
+        trace_delete_reason = evict_bad_overlaps   ? "gc-bad-overlap"
+                              : aggressive_mode    ? "gc-aggressive"
                               : high_priority_mode ? "gc-high-priority"
                                                    : "gc";
         DeleteImage(image_id, image.scale_tick > frame_tick + 5);
@@ -725,8 +728,10 @@ void TextureCache<P>::TickFrame() {
                             ? HostCriticalMemory(runtime.GetDeviceMemoryUsage(), *commit_room)
                             : (std::numeric_limits<u64>::max)();
                     critical_memory = (std::min)(critical_memory, host_critical);
-                    const u64 room_margin = (std::min)(fit_margin + slack_margin, budget / 2);
-                    retention_limit = (std::min)(budget - room_margin, host_critical);
+                    retention_budget = RetentionBudget(retention_budget, budget);
+                    const u64 room_margin =
+                        (std::min)(fit_margin + slack_margin, retention_budget / 2);
+                    retention_limit = (std::min)(retention_budget - room_margin, host_critical);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
                     ApplyThresholdOverrides(false);
                     u64 other_memory = 0;
@@ -774,25 +779,23 @@ void TextureCache<P>::TickFrame() {
                             const u64 raised = (std::min)(
                                 (std::min)(critical_memory + other_memory, heap_critical),
                                 host_critical);
-                            const u64 old_critical = critical_memory;
                             critical_memory = (std::max)(critical_memory, raised);
                             expected_memory =
                                 critical_memory - (std::min)(gap, critical_memory / 2);
-                            // The retention limit (below it, images used in the last
-                            // EDEN_NX2_TC_MIN_AGE frames are kept) moves with the thresholds. Left
-                            // at the device budget, Ocarina's ~1.9 GB that isn't images kept the
-                            // BC-250 above it all session: the collector's 10-50 frame age took
-                            // textures the camera had just turned away from, and 150-380 images a
-                            // second came back within ~2 s on a galloping camera turn (as many
-                            // ASTC decodes and uploads; Hyrule Field 46-52 fps while turning).
-                            // Still bounded by the host's commit room.
+                            // The retention floor is compared with the same usage, so it gets the
+                            // same raise: without it the usage stayed past the floor, and images
+                            // went after the mode's age instead of MinEvictionAge.
+                            // (Same change as this fork's v16 fix; EDEN_NX2_TC_RAISE_RETENTION=0
+                            // leaves the floor at the device budget, for comparisons.)
                             static const bool raise_retention = [] {
                                 const char* value = std::getenv("EDEN_NX2_TC_RAISE_RETENTION");
                                 return value == nullptr || value[0] != '0';
                             }();
-                            if (raise_retention && retention_limit != 0) {
+                            const u64 heap_room =
+                                heap_budget - (std::min)(room_margin, heap_budget / 2);
+                            if (raise_retention) {
                                 retention_limit = (std::min)(
-                                    retention_limit + (critical_memory - old_critical),
+                                    (std::min)(retention_limit + other_memory, heap_room),
                                     host_critical);
                             }
                         }
@@ -811,9 +814,11 @@ void TextureCache<P>::TickFrame() {
                         LogThresholds();
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, host spill {} "
-                                 "MiB, block slack {} MiB, not textures {} MiB",
+                                 "MiB, block slack {} MiB, not textures {} MiB; budget {} MiB, "
+                                 "retention limit {} MiB (lowest budget lately {} MiB)",
                                  margin >> 20, pressure_margin >> 20, spill_margin >> 20,
-                                 slack_margin >> 20, other_memory >> 20);
+                                 slack_margin >> 20, other_memory >> 20, budget >> 20,
+                                 retention_limit >> 20, retention_budget >> 20);
                         if (commit_room) {
                             LOG_INFO(HW_GPU, "Host memory: {} MiB of commit left, {}",
                                      *commit_room >> 20,
@@ -2559,6 +2564,13 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
                              ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
         stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
         if (!Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes)) {
+            if (TextureCacheTrace()) {
+                LOG_WARNING(HW_GPU,
+                            "TCTRACE stale-skip gpu={:#x} fmt={} {}x{}x{} guest={}KiB frame={}",
+                            image.gpu_addr, static_cast<u32>(image.info.format),
+                            image.info.size.width, image.info.size.height, image.info.size.depth,
+                            image.guest_size_bytes / 1024, frame_tick);
+            }
             ++tc_stale_skips;
             tc_stale_skip_bytes += image.guest_size_bytes;
             runtime.TransitionImageLayout(image);
@@ -3127,6 +3139,15 @@ template <class P>
 bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
     if (!image.info.rescaleable) {
         return false;
+    }
+    if constexpr (requires { runtime.GetMaxScaledExtent(); }) {
+        // Past the device's limits the scaled image is invalid. Ocarina of Time's 12288x12288
+        // sun shadow map is 18432 wide at 1.5x and 24576 at 2x, over AMD's 16384, and drawing
+        // into it hangs the GPU (#1885).
+        if (!ScaledImageFits(image.info, Settings::values.resolution_info,
+                             runtime.GetMaxScaledExtent())) {
+            return false;
+        }
     }
     if (Settings::values.resolution_info.downscale && !image.info.downscaleable) {
         return false;
@@ -4641,13 +4662,16 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         if (TextureCacheTrace()) {
             LOG_WARNING(HW_GPU,
                         "TCTRACE delete id={} gpu={:#x} fmt={} {}x{}x{} guest={}KiB immediate={} "
-                        "reason={} frame={}",
+                        "reason={} flags={:#x} downloaded={} frame={}",
                         image_id.index, image.gpu_addr, static_cast<u32>(image.info.format),
                         image.info.size.width, image.info.size.height, image.info.size.depth,
                         image.guest_size_bytes / 1024, immediate_delete, trace_delete_reason,
-                        frame_tick);
+                        static_cast<u32>(image.flags) | trace_delete_flags,
+                        trace_delete_downloaded, frame_tick);
         }
         trace_delete_reason = "other";
+        trace_delete_flags = 0;
+        trace_delete_downloaded = false;
     }
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while

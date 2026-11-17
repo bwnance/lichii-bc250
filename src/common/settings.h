@@ -853,6 +853,9 @@ struct Values {
 #endif
                                                        "vertex_input_dynamic_state", Category::RendererExtensions};
 
+    SwitchableSetting<MeshShaderMode> mesh_shaders{linkage, MeshShaderMode::Automatic,
+                                                   "mesh_shaders", Category::RendererExtensions};
+
     Setting<bool> renderer_debug{linkage, false, "debug", Category::RendererDebug};
     Setting<bool> renderer_shader_feedback{linkage, false, "shader_feedback",
                                            Category::RendererDebug};
@@ -1094,6 +1097,8 @@ struct Values {
     SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
     Setting<bool> lan_play{linkage, false, "lan_play", Category::Network};
     Setting<bool> nextendo_enabled{linkage, false, "nextendo_enabled", Category::Network};
+    // Replaces the current user's nickname and icon with the Nextendo account's.
+    Setting<bool> nextendo_sync_profile{linkage, false, "nextendo_sync_profile", Category::Network};
     Setting<std::string> nextendo_server_ip{linkage, "51.178.29.194", "nextendo_server_ip",
                                            Category::Network};
     Setting<std::string> nextendo_nat_ip{linkage, "164.132.111.120", "nextendo_nat_ip",
