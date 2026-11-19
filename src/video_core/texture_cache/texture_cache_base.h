@@ -315,6 +315,13 @@ public:
     /// Mark an image as modified from the GPU
     void MarkModification(ImageId id) noexcept;
 
+    /// Mark the image behind a view a shader writes through as a storage image
+    void MarkStorageWrite(ImageViewId id) noexcept;
+
+    /// Whether a view's image is absent or holds a shader's storage writes over every level it
+    /// covers, with nothing newer (no clear, render pass, copy or CPU write since).
+    [[nodiscard]] bool StorageViewHoldsShaderWrites(ImageViewId id) const noexcept;
+
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
@@ -378,6 +385,10 @@ public:
     /// Find a framebuffer with the currently bound render targets
     /// UpdateRenderTargets should be called before this
     Framebuffer* GetFramebuffer();
+
+    /// Whether render target `index` was first written in an earlier frame: a target the title
+    /// draws every frame, rather than one it fills once (Eglantine #874).
+    [[nodiscard]] bool ColorTargetWrittenBeforeThisFrame(u32 index) noexcept;
 
     [[nodiscard]] const RenderTargets& GetRenderTargets() const noexcept {
         return render_targets;
@@ -735,6 +746,9 @@ private:
     bool clearing_render_targets = false;
     /// True while FindRenderTargetView finds or creates the image a render target binds.
     bool creating_render_target = false;
+    /// True while a draw binds its render targets (UpdateRenderTargets(false)): only these writes
+    /// set first_written_frame, not blits, copies or DMA.
+    bool drawing_render_targets = false;
     bool is_rescaling = false;
     /// The bound depth target is wider than tall by padding only (see FindDepthBuffer).
     bool depth_target_padded = false;

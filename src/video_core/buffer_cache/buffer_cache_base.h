@@ -478,6 +478,13 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
+    /// Whether every byte the bound compute storage and texture buffers would mark GPU-written
+    /// for this dispatch already holds GPU writes. Call before the bindings are made (and mark).
+    [[nodiscard]] bool ComputeWritesHoldGpuData();
+
+    /// Whether every byte of the range holds GPU writes (a DMA clear or CPU write removes them).
+    [[nodiscard]] bool IsRegionFullyGpuModified(DAddr addr, size_t size);
+
     /// Visits the uniform and storage buffers bound for the last draw or dispatch with the cached
     /// host buffer holding each range, if one does, for diagnostics. Nothing is
     /// created or synchronized. Stage 5 is compute.

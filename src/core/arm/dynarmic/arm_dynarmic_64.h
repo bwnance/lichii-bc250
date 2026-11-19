@@ -68,6 +68,11 @@ public:
     /// Warm compiles read code straight from memory: other threads reset last_code_addr
     /// (InvalidateCacheRange) and the page copy may hold another page (fable52_answer_12).
     bool direct_code_reads = false;
+    u32 cached_code_generation = 0;
+    /// Raised by every code invalidation on any core: with the shared JIT a block one core
+    /// recompiles may come from a page another core invalidated, so the cached page of every
+    /// core goes stale.
+    static inline std::atomic<u32> code_generation{0};
     ArmDynarmic64& m_parent;
     Core::Memory::Memory& m_memory;
     u64 m_tpidrro_el0{};

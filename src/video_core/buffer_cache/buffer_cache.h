@@ -2357,6 +2357,39 @@ bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
 }
 
 template <class P>
+bool BufferCache<P>::ComputeWritesHoldGpuData() {
+    bool holds = true;
+    ForEachEnabledBit(channel_state->enabled_compute_storage_buffers &
+                          channel_state->written_compute_storage_buffers,
+                      [&](u32 index) {
+                          const Binding& binding = channel_state->compute_storage_buffers[index];
+                          // As much as BindHostComputeStorageBuffers marks written
+                          const bool native =
+                              ((channel_state->native_compute_storage_buffers >> index) & 1) != 0;
+                          const u32 size =
+                              native ? (std::min)(binding.size,
+                                                  channel_state->compute_storage_write_marks[index])
+                                     : binding.size;
+                          holds &= IsRegionFullyGpuModified(binding.device_addr, size);
+                      });
+    ForEachEnabledBit(channel_state->enabled_compute_texture_buffers &
+                          channel_state->written_compute_texture_buffers,
+                      [&](u32 index) {
+                          const Binding& binding = channel_state->compute_texture_buffers[index];
+                          holds &= IsRegionFullyGpuModified(binding.device_addr, binding.size);
+                      });
+    return holds;
+}
+
+template <class P>
+bool BufferCache<P>::IsRegionFullyGpuModified(DAddr addr, size_t size) {
+    size_t covered = 0;
+    gpu_modified_ranges.ForEachInRange(addr, size,
+                                       [&](DAddr lower, DAddr upper) { covered += upper - lower; });
+    return covered == size;
+}
+
+template <class P>
 bool BufferCache<P>::IsRegionRegistered(DAddr addr, size_t size) {
     const DAddr end_addr = addr + size;
     const u64 page_end = Common::DivCeil(end_addr, CACHING_PAGESIZE);

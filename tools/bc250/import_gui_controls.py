@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Copy the controller mapping made in the Lichii GUI into the game's config file.
 
-The Steam shortcut runs eden-cli with its own config (oot.ini), while the GUI keeps its settings in
+The Steam shortcut runs eden-cli with its own config (game.ini; oot.ini before v18), while the GUI keeps its settings in
 ~/.config/eden/qt-config.ini. When a controller is mapped in the GUI (Emulation > Configure >
 Controls), the launcher calls this script before starting the game: it replaces the player_*
 lines of [Controls] in the game config with the GUI's and leaves every other line alone.

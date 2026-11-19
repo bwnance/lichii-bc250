@@ -1,16 +1,21 @@
 #!/bin/bash
 # lichii-bc250 installer for the AMD BC-250 console (CachyOS).
 #
-# Usage:  ./tools/bc250/bc250-install.sh [--release <tag>] [--build [--pgo]] [--with-shortcut] [--game <path>]
+# Usage:  ./tools/bc250/bc250-install.sh [--release <tag>] [--build [--pgo]]
+#                                          [--add-game <path> [--name "<Steam name>"]]...
 #
 #   (default)        download the prebuilt package of the latest GitHub release (PGO build, ~100 MB)
 #                    into ~/Applications/lichii-bc250/lichii; nothing is compiled
-#   --release <tag>  download that release instead of the latest (e.g. --release v7)
+#   --release <tag>  download that release instead of the latest (e.g. --release v8)
 #   --build          compile eden-cli from this checkout on the host instead (30-60 min)
 #   --pgo            with --build: use the bundled Lichii profile (~10% more fps) and the system
 #                    LLVM (clang 22+); with an older one, downloads LLVM 23 (~2 GB, keeps ~600 MB)
-#   --with-shortcut  add a Steam non-Steam shortcut (needs --game and Steam stopped)
-#   --game <path>    your own Ocarina of Time dump, for the shortcut
+#   --add-game <path>  add a Steam (non-Steam game) shortcut that runs this game dump through the
+#                    BC-250 wrapper and its settings (game.ini); repeat it for several games. Steam must
+#                    be stopped. On an existing install, giving only --add-game (and --name) adds the
+#                    shortcuts without reinstalling anything.
+#   --name "<name>"  the Steam name for the --add-game before it (default: from the file name)
+#   --with-shortcut --game <path>   older form of --add-game, kept for existing scripts
 #
 # What it does:
 #   1. Adds a udev rule so Steam Input can read Xbox One S-style Bluetooth pads' sticks.
@@ -18,8 +23,8 @@
 #      dependencies with pacman and builds eden-cli from this checkout (Release, clang, no Qt;
 #      PGO with --pgo).
 #   3. Installs the launch wrapper with the BC-250 tuning and the per-game config template.
-#   4. Optionally registers a Steam non-Steam shortcut for your Ocarina of Time dump
-#      (requires Steam to be stopped; the installer tells you when).
+#   4. Optionally registers Steam non-Steam shortcuts for your game dumps (--add-game;
+#      requires Steam to be stopped; the installer tells you when).
 #
 # The first launch of the game stays on a black screen for 3-5 minutes while it prepares
 # the shader pipelines; later boots are much faster. See the README for details.
@@ -38,20 +43,88 @@ GITHUB_REPO=lethevimlet/lichii-bc250
 LLVM_VERSION=23.1.5
 LLVM_DIR="$HOME/.local/share/lichii-bc250/llvm23"
 GAME_PATH=""
+ADD_GAMES=()     # --add-game paths
+ADD_NAMES=()     # their --name (empty: from the file name)
+ONLY_ADD=1       # nothing but --add-game/--name given: just add the shortcuts
+[ $# -eq 0 ] && ONLY_ADD=0
 while [ $# -gt 0 ]; do
+    opt="$1"
     case "$1" in
-        --with-shortcut) WITH_SHORTCUT=1 ;;
+        --add-game) shift; [ $# -gt 0 ] || { echo "--add-game needs a path"; exit 1; }
+            ADD_GAMES+=("$1"); ADD_NAMES+=("") ;;
+        --name) shift; [ $# -gt 0 ] || { echo "--name needs a name"; exit 1; }
+            [ ${#ADD_GAMES[@]} -gt 0 ] || { echo "--name goes after the --add-game it names"; exit 1; }
+            ADD_NAMES[$((${#ADD_GAMES[@]} - 1))]="$1" ;;
+        --with-shortcut) WITH_SHORTCUT=1; ONLY_ADD=0 ;;
         --pgo) WITH_PGO=1; WITH_BUILD=1 ;;
         --build) WITH_BUILD=1 ;;
         --release) shift; [ $# -gt 0 ] || { echo "--release needs a tag"; exit 1; }; RELEASE_TAG="$1" ;;
-        --game) shift; [ $# -gt 0 ] || { echo "--game needs a path"; exit 1; }; GAME_PATH="$1" ;;
-        -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        --game) shift; [ $# -gt 0 ] || { echo "--game needs a path"; exit 1; }; GAME_PATH="$1"; ONLY_ADD=0 ;;
+        -h|--help) sed -n '2,31p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
+    case "$opt" in --add-game|--name) ;; *) ONLY_ADD=0 ;; esac
     shift
 done
+# The older --with-shortcut --game form: the same shortcut as before ("Zelda Ocarina of Time").
+if [ "$WITH_SHORTCUT" = 1 ]; then
+    if [ -z "$GAME_PATH" ]; then
+        echo "--with-shortcut needs --game \"<path to your dump>\" (or use --add-game)" >&2; exit 1
+    fi
+    ADD_GAMES+=("$GAME_PATH"); ADD_NAMES+=("")
+fi
 
 log() { printf "\033[1;36m[lichii-bc250]\033[0m %s\n" "$*"; }
+
+# --- Steam shortcuts (--add-game) ---------------------------------------------
+# The Steam name for a game dump: from its file name without the extension and [..]/(..) tags.
+# Ocarina of Time keeps the name the installer always gave it, so its shortcut (and Steam's id
+# for it, made from the name) stays the same one.
+game_name() {
+    local f
+    f=$(basename "$1"); f=${f%.*}
+    case "$f" in
+        *0400486024DEC000*|*0400486024dec000*|*Ocarina*) echo "Zelda Ocarina of Time"; return ;;
+    esac
+    f=$(printf '%s' "$f" | sed -E 's/\[[^]]*\]//g; s/\([^)]*\)//g; s/_/ /g; s/ +/ /g; s/^ +| +$//g')
+    echo "${f:-Game}"
+}
+add_shortcuts() {
+    local tool="" t i path name vdf
+    for t in "$APP_DIR/lichii/tools/add_steam_shortcut.py" "$REPO_DIR/tools/bc250/add_steam_shortcut.py"; do
+        if [ -f "$t" ]; then tool=$t; break; fi
+    done
+    [ -n "$tool" ] || { echo "add_steam_shortcut.py not found (reinstall, or run from a checkout)" >&2; return 1; }
+    if pgrep -x steam >/dev/null; then
+        cat >&2 <<'MSG'
+Steam is running. The shortcut file can only be edited while Steam is stopped (Steam rewrites
+it from memory otherwise). Switch to Desktop Mode, quit Steam (Steam menu > Exit), then run the
+installer again with the same --add-game options; it only adds the shortcuts.
+MSG
+        return 1
+    fi
+    vdf=$(ls -1 "$HOME"/.local/share/Steam/userdata/*/config/shortcuts.vdf 2>/dev/null | head -1)
+    if [ -z "$vdf" ]; then
+        # No non-Steam game yet: Steam has no shortcuts.vdf; start an empty one.
+        t=$(ls -1d "$HOME"/.local/share/Steam/userdata/*/config 2>/dev/null | head -1)
+        [ -n "$t" ] || { echo "no Steam user found (start Steam once and log in first)" >&2; return 1; }
+        vdf="$t/shortcuts.vdf"
+        printf '\000shortcuts\000\010\010' > "$vdf"
+    fi
+    for i in "${!ADD_GAMES[@]}"; do
+        path=$(realpath -e "${ADD_GAMES[$i]}" 2>/dev/null) || { echo "no such game: ${ADD_GAMES[$i]}" >&2; return 1; }
+        name=${ADD_NAMES[$i]:-$(game_name "$path")}
+        python3 "$tool" --vdf "$vdf" --name "$name" --exe "$APP_DIR/lichii-bc250" \
+            --launch-options "-f -g \"$path\""
+        log "Steam shortcut \"$name\" -> $path"
+    done
+    log "start Steam: the games are in your library under Non-Steam (they use $APP_DIR/game.ini)"
+}
+# Only --add-game given and the emulator already installed: add the shortcuts, nothing else.
+if [ "$ONLY_ADD" = 1 ] && [ ${#ADD_GAMES[@]} -gt 0 ] && [ -x "$APP_DIR/lichii-bc250" ]; then
+    add_shortcuts
+    exit $?
+fi
 
 if [ "$(id -u)" = 0 ]; then
     # Build and install as the desktop user so the build tree, ~/Applications and the
@@ -207,7 +280,7 @@ mkdir -p "$APP_DIR"
 cat > "$APP_DIR/lichii-bc250" <<'WRAP'
 #!/usr/bin/env bash
 # lichii-bc250 launcher: tunes the emulator for the BC-250 iGPU, then runs eden-cli.
-# Usage: lichii-bc250 [-f] -c <config.ini> -g "<path to your game dump>"
+# Usage: lichii-bc250 [-f] [-c <config.ini>] -g "<path to your game dump>"   (default config: game.ini)
 #        lichii-bc250 --gui      the Lichii GUI (settings, controller mapping, game list)
 # A controller mapped in the GUI is copied into the -c config before the game starts.
 set -euo pipefail
@@ -239,6 +312,10 @@ export EDEN_NX2_FORCE_MESH_FALLBACK=1
 # ~/.local/share/Steam/steamapps/shadercache/<id>/fozpipelinesv6: it never stops growing (42 GB on
 # the BC-250 in one day of play and tests, until the disk was full) and nothing ever uses it.
 export DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1
+# Borderless Gaming registers its Vulkan effects layer (VK_LAYER_BGFX_effects) for every Vulkan
+# program through ~/.local/share/vulkan/loader_settings.d; inside the emulator it aborts at start
+# ("Failed to create the thread pool Gate thread"). Its own off switch; nothing on other systems.
+export DISABLE_BGFX=1
 if [ "${1:-}" = --gui ]; then
     shift
     if [ -z "$GUI_EXEC" ]; then
@@ -252,6 +329,11 @@ else
         [ "$prev" = -c ] && config="$arg"
         prev="$arg"
     done
+    # No -c: the BC-250 settings in game.ini (every game; v18).
+    if [ -z "$config" ] && [ -f "$APP_DIR/game.ini" ]; then
+        config="$APP_DIR/game.ini"
+        set -- -c "$config" "$@"
+    fi
     if [ -n "$config" ] && [ -f "$APP_DIR/import_gui_controls.py" ] && command -v python3 >/dev/null; then
         python3 "$APP_DIR/import_gui_controls.py" "$config" || true
     fi
@@ -302,13 +384,27 @@ Terminal=false
 DESKTOP
 fi
 
-if [ ! -f "$APP_DIR/oot.ini" ] && [ -f "$HOME/.config/lichii-bc250/oot.ini" ]; then
-    log "restoring your game config (controls) kept by the uninstaller"
-    cp -p "$HOME/.config/lichii-bc250/oot.ini" "$APP_DIR/oot.ini"
+# The game config is game.ini (v18; oot.ini before). An older install's oot.ini becomes game.ini,
+# and oot.ini stays as a link to it for shortcuts and launchers that still name it.
+if [ -f "$APP_DIR/oot.ini" ] && [ ! -L "$APP_DIR/oot.ini" ] && [ ! -e "$APP_DIR/game.ini" ]; then
+    log "renaming $APP_DIR/oot.ini to game.ini (oot.ini stays as a link to it)"
+    mv "$APP_DIR/oot.ini" "$APP_DIR/game.ini"
+    for b in "$APP_DIR"/oot.ini.bak-*; do [ -e "$b" ] && mv "$b" "$APP_DIR/game.ini.bak-${b##*.bak-}" || true; done
+    [ -e "$APP_DIR/oot.ini.gui-controls" ] && mv "$APP_DIR/oot.ini.gui-controls" "$APP_DIR/game.ini.gui-controls" || true
+    [ -e "$APP_DIR/oot.ini.before-gui-controls" ] && mv "$APP_DIR/oot.ini.before-gui-controls" "$APP_DIR/game.ini.before-gui-controls" || true
 fi
-if [ ! -f "$APP_DIR/oot.ini" ]; then
-    log "writing the per-game config template ($APP_DIR/oot.ini)"
-    cat > "$APP_DIR/oot.ini" <<'INI'
+if [ ! -f "$APP_DIR/game.ini" ]; then
+    for kept in "$HOME/.config/lichii-bc250/game.ini" "$HOME/.config/lichii-bc250/oot.ini"; do
+        if [ -f "$kept" ]; then
+            log "restoring your game config (controls) kept by the uninstaller"
+            cp -p "$kept" "$APP_DIR/game.ini"
+            break
+        fi
+    done
+fi
+if [ ! -f "$APP_DIR/game.ini" ]; then
+    log "writing the per-game config template ($APP_DIR/game.ini)"
+    cat > "$APP_DIR/game.ini" <<'INI'
 [DisabledAddOns]
 size=1
 1\title_id\default=false
@@ -342,8 +438,6 @@ fsr_sharpening_slider\default=false
 fsr_sharpening_slider=60
 
 [System]
-memory_layout_mode\default=false
-memory_layout_mode=2
 use_docked_mode\default=false
 use_docked_mode=0
 [Controls]
@@ -1171,31 +1265,33 @@ INI
 else
     # Keep the user's file (controls, their own changes) but bring the tuned frame
     # generation settings up to date: v4 always 2x, v5 a 4-frame presentation queue.
-    backup="$APP_DIR/oot.ini.bak-$(date +%Y%m%d-%H%M%S)"
-    cp -p "$APP_DIR/oot.ini" "$backup"
-    ls -1t "$APP_DIR"/oot.ini.bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f   # keep the last 5
-    log "keeping the existing $APP_DIR/oot.ini (controls and your own changes; copy in $backup);"
+    backup="$APP_DIR/game.ini.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$APP_DIR/game.ini" "$backup"
+    ls -1t "$APP_DIR"/game.ini.bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f   # keep the last 5
+    log "keeping the existing $APP_DIR/game.ini (controls and your own changes; copy in $backup);"
     log "updating only its frame generation settings"
     for kv in frame_gen=true frame_gen_type=1 frame_gen_multiplier=2 frame_gen_target_rate=0 \
               frame_gen_queue_target=1; do
         key=${kv%%=*}
-        if grep -q "^$key=" "$APP_DIR/oot.ini"; then
-            sed -i "s|^$key=.*|$kv|; s|^$key\\\\default=.*|$key\\\\default=false|" "$APP_DIR/oot.ini"
+        if grep -q "^$key=" "$APP_DIR/game.ini"; then
+            sed -i "s|^$key=.*|$kv|; s|^$key\\\\default=.*|$key\\\\default=false|" "$APP_DIR/game.ini"
         else
-            sed -i "/^\\[Renderer\\]/a $key\\\\default=false\\n$kv" "$APP_DIR/oot.ini"
+            sed -i "/^\\[Renderer\\]/a $key\\\\default=false\\n$kv" "$APP_DIR/game.ini"
         fi
     done
 fi
+[ -e "$APP_DIR/oot.ini" ] || ln -s game.ini "$APP_DIR/oot.ini"
 
 B=$'\033[1m' N=$'\033[0m'
 cat <<DONE
 
 ${B}Installed.${N} Launch the game with:
 
-  $APP_DIR/lichii-bc250 -f -c $APP_DIR/oot.ini -g "<path to your Ocarina of Time dump>"
+  $APP_DIR/lichii-bc250 -f -g "<path to your game dump>"
 
-The -c file holds the tuned per-game settings (every \\default=false line matters:
-without it the loader ignores the value next to it).
+Steam shortcut for a game: run the installer again with --add-game "<path>" (Steam stopped).
+The settings are in $APP_DIR/game.ini, used when no -c is given (every \\default=false line
+matters: without it the loader ignores the value next to it).
 
 ${B}First launch:${N} the screen stays black for 3-5 minutes while the
 shader pipelines are prepared. This is normal, happens once per game version
@@ -1250,27 +1346,7 @@ check_system() {
 }
 check_system
 
-# --- 4. Steam shortcut (optional) --------------------------------------------
-if [ "$WITH_SHORTCUT" = 1 ]; then
-    if [ -z "$GAME_PATH" ]; then
-        log "shortcut needs the game: add --game \"<path to your dump>\""
-        exit 0
-    fi
-    [ -f "$GAME_PATH" ] || { echo "no such game file: $GAME_PATH" >&2; exit 1; }
-    if pgrep -x steam >/dev/null; then
-        cat >&2 <<'MSG'
-Steam is running. The shortcut file can only be edited while Steam is stopped
-(Steam rewrites it from memory otherwise). Close Steam/Gaming Mode, then rerun
-the installer with the same --with-shortcut --game options.
-MSG
-        exit 1
-    fi
-    VDF=$(ls -1 "$HOME"/.local/share/Steam/userdata/*/config/shortcuts.vdf 2>/dev/null | head -1)
-    [ -n "$VDF" ] || { echo "no shortcuts.vdf found (run Steam once first)" >&2; exit 1; }
-    log "adding the Steam shortcut to $(basename "$(dirname "$(dirname "$VDF")")")"
-    python3 "$REPO_DIR_TOOLS/add_steam_shortcut.py" \
-        --vdf "$VDF" --name "Zelda Ocarina of Time" \
-        --exe "$APP_DIR/lichii-bc250" \
-        --launch-options "-f -c \"$APP_DIR/oot.ini\" -g \"$(realpath "$GAME_PATH")\""
-    log "shortcut added; start Steam and it will be in your library under Non-Steam"
+# --- 4. Steam shortcuts (optional) -------------------------------------------
+if [ ${#ADD_GAMES[@]} -gt 0 ]; then
+    add_shortcuts || exit 1
 fi

@@ -2,7 +2,7 @@
   <img src="logo.png" alt="lichii-bc250 logo" width="520">
 </p>
 
-# lichii-bc250 v17
+# lichii-bc250 v20
 
 > **Disclaimer: this project does not support or condone piracy.** No game data, keys,
 > firmware or other copyrighted console assets are included, provided or linked here. The
@@ -201,8 +201,9 @@ It downloads the latest release package from GitHub (built with Lichii's perform
 Ubuntu 24.04; it runs on CachyOS and Bazzite and uses the system's own GPU driver), unpacks it
 to `~/Applications/lichii-bc250/lichii`, and installs the launcher
 `~/Applications/lichii-bc250/lichii-bc250`, which sets the BC-250 tuning, plus the game settings
-`~/Applications/lichii-bc250/oot.ini` (frame generation, the presentation queue, the Xbox 360
-controller mapping, and so on). `--release v8` picks a specific release.
+`~/Applications/lichii-bc250/game.ini` (frame generation, the presentation queue, the Xbox 360
+controller mapping, and so on; `oot.ini` before v18, which stays as a link to it). Every game
+started through the launcher gets the same tuning and settings. `--release v8` picks a specific release.
 
 The emulator runs directly on the system; this fork does not use the `lichii-bc250-runtime`
 container from upstream (which saves about 1.4 GB of RAM on Bazzite).
@@ -213,7 +214,7 @@ Installer options:
 |---|---|
 | `--release <tag>` | Installs a specific release, for example `--release v8` (default: the latest). |
 | `--build [--pgo]` | Compiles the emulator yourself instead of downloading it (see below). |
-| `--with-shortcut --game <path>` | Also adds a Steam shortcut for your dump (step 4). |
+| `--add-game <path> [--name "<name>"]` | Adds a Steam shortcut for a game dump (step 4); repeat it for several games. On an existing install it only adds the shortcuts. |
 
 **Build it yourself instead** (30-60 minutes the first time):
 
@@ -231,24 +232,30 @@ Either way the installer also adds the controller udev rule from step 1.
 
 **Check:** the installer ends with `Installed.` and the launch command.
 
-### Step 4: add the game to Steam (optional)
+### Step 4: add your games to Steam (optional)
 
-To start the game from Gaming Mode with a controller, register it as a non-Steam game. Steam
-must be closed for this (it rewrites its shortcut file otherwise): switch to Desktop Mode, quit
+To start a game from Gaming Mode with a controller, register it as a non-Steam game. Steam must
+be closed for this (it rewrites its shortcut file otherwise): switch to Desktop Mode, quit
 Steam, then run:
 
 ```sh
-./tools/bc250/bc250-install.sh --with-shortcut --game "/path/to/your/Ocarina of Time dump"
+./tools/bc250/bc250-install.sh --add-game "/path/to/your/Ocarina of Time dump"
+./tools/bc250/bc250-install.sh --add-game "/path/to/Mario Kart World.nup" --name "Mario Kart World"
 ```
 
-The second run downloads the package again (or reuses your build with `--build`) and adds the shortcut. Start Steam again: the game
-is in your library under **Non-Steam**.
+On an existing install this only adds the shortcuts (nothing is downloaded); several
+`--add-game` options in one run add several games. The Steam name comes from the file name unless
+you give `--name`. Start Steam again: the games are in your library under **Non-Steam**.
 
-Without Steam, launch it directly:
+**Other games:** every game started through the launcher gets the BC-250 tuning and `game.ini`
+(frame generation, the 30 fps tick, the memory limits) that were tuned on Ocarina of Time. Mario
+Kart World ran at about 56 fps on screen with them in a first test (30-45 without frame
+generation). Other games are untested; if one misbehaves, tell us in an issue.
+
+Without Steam, launch a game directly (`game.ini` is used when you give no `-c`):
 
 ```sh
-~/Applications/lichii-bc250/lichii-bc250 -f -c ~/Applications/lichii-bc250/oot.ini \
-  -g "/path/to/your/Ocarina of Time dump"
+~/Applications/lichii-bc250/lichii-bc250 -f -g "/path/to/your/game dump"
 ```
 
 **Check:** the game starts (see step 5 for the first boot).
@@ -270,19 +277,20 @@ git pull
 ./tools/bc250/bc250-install.sh            # or: --build --pgo if you build it yourself
 ```
 
-Your `oot.ini` is kept (controls and your own changes), but the installer brings its frame
-generation settings up to date and saves a copy first (`oot.ini.bak-<date>`, the last five are
-kept). The uninstaller keeps it too (`~/.config/lichii-bc250/oot.ini`), and a reinstall puts it
-back. A Steam shortcut made earlier keeps working.
+Your `game.ini` is kept (controls and your own changes), but the installer brings its frame
+generation settings up to date and saves a copy first (`game.ini.bak-<date>`, the last five are
+kept). The uninstaller keeps it too (`~/.config/lichii-bc250/game.ini`), and a reinstall puts it
+back. Updating from v17 or older renames `oot.ini` to `game.ini` and leaves `oot.ini` as a link,
+so a Steam shortcut made earlier keeps working.
 
 ## Uninstalling
 
 ```sh
-./tools/bc250/bc250-uninstall.sh            # launcher, package, Steam shortcut, containers
+./tools/bc250/bc250-uninstall.sh            # launcher, package, Steam shortcuts, containers
 ./tools/bc250/bc250-uninstall.sh --system   # also reverts the sysctl and zram steps (sudo)
 ```
 
-Close Steam first if you want the shortcut removed (Steam rewrites its shortcut file otherwise).
+Close Steam first if you want the shortcuts removed (Steam rewrites its shortcut file otherwise).
 Your saves, keys, firmware and shader caches in `~/.local/share/eden` are never touched; the disk
 swapfile and kernel arguments are left in place, and the uninstaller prints how to remove them.
 
@@ -296,15 +304,15 @@ mapping). In Desktop Mode it is in the application menu as **Lichii BC-250**, or
 ```
 
 It uses the same keys, firmware, saves and shader caches as the Steam shortcut. Its own settings
-live in `~/.config/eden/qt-config.ini`; the Steam shortcut keeps using `oot.ini`. One exception:
-**a controller you map in the GUI** (Emulation > Configure > Controls) is copied into `oot.ini`
-the next time the game starts from the shortcut (a copy of the old file is kept as
-`oot.ini.before-gui-controls`). Play from the shortcut for the BC-250 settings (frame
-generation, the texture cache limits and the rest of `oot.ini`).
+live in `~/.config/eden/qt-config.ini`; the Steam shortcuts keep using `game.ini`. One exception:
+**a controller you map in the GUI** (Emulation > Configure > Controls) is copied into `game.ini`
+the next time a game starts from a shortcut (a copy of the old file is kept as
+`game.ini.before-gui-controls`). Play from the shortcuts for the BC-250 settings (frame
+generation, the texture cache limits and the rest of `game.ini`).
 
 ## Settings worth knowing
 
-All of these are in `oot.ini`; every value needs its `<key>\default=false` line next to it, or
+All of these are in `game.ini`; every value needs its `<key>\default=false` line next to it, or
 the emulator ignores it.
 
 - **Frame generation** (`frame_gen=true`, FSR3, multiplier 2, `frame_gen_target_rate=0`): one

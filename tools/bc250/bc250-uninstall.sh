@@ -5,7 +5,7 @@
 #
 #   (default)  removes what bc250-install.sh added for your user:
 #                - the launcher and package in ~/Applications/lichii-bc250
-#                - the "Zelda Ocarina of Time" Steam shortcut it registered (Steam must be stopped)
+#                - the Steam shortcuts it registered (--add-game; Steam must be stopped)
 #                - the lichii-bc250-build and lichii-bc250-runtime containers and ~/.local/share/lichii-bc250
 #                  (the LLVM download for --pgo builds)
 #                - build/ and build-pgo/ in this checkout
@@ -124,13 +124,16 @@ else
 fi
 
 # --- Launcher, package, container, downloads, build dirs ----------------------
-if [ -f "$APP_DIR/oot.ini" ]; then
-    # The game config holds the person's controller mapping: keep a copy, which the
-    # installer puts back on a reinstall.
-    mkdir -p "$HOME/.config/lichii-bc250"
-    cp -p "$APP_DIR/oot.ini" "$HOME/.config/lichii-bc250/oot.ini"
-    log "kept your game config (controls) in ~/.config/lichii-bc250/oot.ini; a reinstall uses it"
-fi
+# The game config (game.ini; oot.ini before v18) holds the person's controller mapping: keep a
+# copy, which the installer puts back on a reinstall.
+for cfg in "$APP_DIR/game.ini" "$APP_DIR/oot.ini"; do
+    if [ -f "$cfg" ]; then
+        mkdir -p "$HOME/.config/lichii-bc250"
+        cp -pL "$cfg" "$HOME/.config/lichii-bc250/game.ini"
+        log "kept your game config (controls) in ~/.config/lichii-bc250/game.ini; a reinstall uses it"
+        break
+    fi
+done
 if [ -d "$APP_DIR" ]; then
     log "removing $APP_DIR"
     rm -rf "$APP_DIR"
